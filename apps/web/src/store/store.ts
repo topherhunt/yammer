@@ -683,11 +683,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       applyResponse,
 
       updateSettings(patch) {
-        const settings: Settings = { ...get().app.settings, ...patch };
-        set((s) => ({ app: { ...s.app, settings } }));
-        // Fire the same persist_settings effect the reducer emits for the load
-        // sort, so settings-dialog changes are durably saved.
-        runEffects([{ type: "persist_settings", settings }]);
+        // Route settings-dialog changes through the same update_settings action
+        // the LLM emits by voice ("switch to dark mode"), so click and voice
+        // share one path: the reducer updates settings + emits persist_settings.
+        get().dispatch({ type: "update_settings", ...patch });
       },
 
       submitTranscript(text, sttSeconds) {

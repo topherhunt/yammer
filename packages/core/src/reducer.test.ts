@@ -155,6 +155,23 @@ describe("read_version", () => {
   });
 });
 
+describe("update_settings", () => {
+  it("merges only the provided fields and persists", () => {
+    const { state, effects } = applyAction(
+      docState("x"),
+      { type: "update_settings", theme: "dark", sfxEnabled: false },
+      makeCtx("ai"),
+    );
+    expect(state.settings.theme).toBe("dark");
+    expect(state.settings.sfxEnabled).toBe(false);
+    expect(state.settings.loadDocSort).toBe("updated"); // untouched
+    expect(effects).toContainEqual({
+      type: "persist_settings",
+      settings: state.settings,
+    });
+  });
+});
+
 describe("set_listening", () => {
   it("moves to listening and plays the unmute sound", () => {
     const { state, effects } = applyAction(

@@ -23,6 +23,7 @@ export function buildSystemPrompt(): string {
     "- open_dialog { dialog: 'menu' | 'help' | 'load' | 'history' | 'settings', sort? } / close_dialog / set_panel { panel }",
     "- copy_document / download_document { format: 'md' | 'docx' } / download_diagnostics",
     "- set_listening { state: 'listening' | 'paused' | 'muted' }",
+    "- update_settings { theme?, sfxEnabled?, silenceThresholdMs?, optimisticSendMs?, chatCompactThreshold?, loadDocSort? } -- change a preference by voice, e.g. 'switch to dark mode' -> update_settings { theme: 'dark' }; 'turn off sound effects' -> update_settings { sfxEnabled: false }.",
     "- research { queries: string[] } -- ONLY when the user explicitly asks to search the web.",
     "- clarify { question } -- prefer this over guessing on ambiguous or destructive requests.",
     "",

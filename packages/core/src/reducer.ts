@@ -424,6 +424,15 @@ export function applyAction(
       };
     }
 
+    case "update_settings": {
+      const { type: _ignored, ...patch } = action;
+      const settings = { ...state.settings, ...patch };
+      return {
+        state: { ...state, settings },
+        effects: [{ type: "persist_settings", settings }],
+      };
+    }
+
     case "set_listening": {
       const next: AppState = { ...state, listening: action.state };
       const effects: Effect[] = [{ type: "set_listening", state: action.state }];

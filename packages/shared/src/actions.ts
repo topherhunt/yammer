@@ -140,6 +140,18 @@ export const setListeningAction = z.object({
   state: z.enum(["listening", "paused", "muted"]),
 });
 
+// Change a user preference by voice ("switch to dark mode", "turn off sound
+// effects"). Every field is optional -- only the provided ones are updated.
+export const updateSettingsAction = z.object({
+  type: z.literal("update_settings"),
+  theme: z.enum(["system", "light", "dark"]).optional(),
+  loadDocSort: z.enum(["name", "created", "updated"]).optional(),
+  sfxEnabled: z.boolean().optional(),
+  silenceThresholdMs: z.number().int().nonnegative().optional(),
+  optimisticSendMs: z.number().int().nonnegative().optional(),
+  chatCompactThreshold: z.number().int().positive().optional(),
+});
+
 // -- Research -------------------------------------------------------------
 
 export const researchAction = z.object({
@@ -178,6 +190,7 @@ export const actionSchema = z.discriminatedUnion("type", [
   copyDocumentAction,
   downloadDocumentAction,
   setListeningAction,
+  updateSettingsAction,
   researchAction,
   downloadDiagnosticsAction,
   clarifyAction,
