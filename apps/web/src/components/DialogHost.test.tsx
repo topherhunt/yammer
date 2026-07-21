@@ -3,6 +3,7 @@ import { act, fireEvent } from "@testing-library/react";
 import type { AppState } from "@yammer/shared";
 import { createVersion } from "@yammer/core";
 import { DialogHost } from "./DialogHost";
+import { useStoreApi } from "../store/context";
 import { renderWithStore } from "../test/render";
 
 const v0 = createVersion({
@@ -90,5 +91,76 @@ describe("DialogHost keyboard", () => {
     expect(store.getState().app.openDialog).toBe("menu");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(store.getState().app.openDialog).toBeNull();
+  });
+});
+
+// A trigger button next to the dialog host, so we can assert focus moves INTO the
+// dialog on open and is RESTORED to the trigger on close.
+function TrapHarness() {
+  const api = useStoreApi();
+  return (
+    <>
+      <button
+        type="button"
+        className="qa-trigger"
+        onClick={() => api.getState().dispatch({ type: "open_dialog", dialog: "menu" })}
+      >
+        Open menu
+      </button>
+      <DialogHost />
+    </>
+  );
+}
+
+describe("DialogHost accessibility", () => {
+  it("moves focus into the dialog on open", () => {
+    const { container } = renderWithStore(<TrapHarness />);
+    const trigger = container.querySelector(".qa-trigger") as HTMLButtonElement;
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = container.querySelector(".qa-dialog-menu") as HTMLElement;
+    // Focus is now inside the dialog, not left on the (inert) page behind it.
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("traps Tab within the dialog (wraps last -> first and first -> last)", () => {
+    const { container } = renderWithStore(<TrapHarness />);
+    const trigger = container.querySelector(".qa-trigger") as HTMLButtonElement;
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = container.querySelector(".qa-dialog-menu") as HTMLElement;
+    const focusables = Array.from(
+      dialog.querySelectorAll<HTMLElement>("button"),
+    );
+    const first = focusables[0]!; // the close (✕) button
+    const last = focusables[focusables.length - 1]!; // the last menu item
+
+    // Tab off the last element wraps back to the first.
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(document.activeElement).toBe(first);
+
+    // Shift+Tab off the first element wraps to the last.
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("restores focus to the trigger when the dialog closes", () => {
+    const { store, container } = renderWithStore(<TrapHarness />);
+    const trigger = container.querySelector(".qa-trigger") as HTMLButtonElement;
+    trigger.focus();
+    fireEvent.click(trigger);
+    expect(store.getState().app.openDialog).toBe("menu");
+    // Focus was pulled into the dialog.
+    expect(document.activeElement).not.toBe(trigger);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(store.getState().app.openDialog).toBeNull();
+    // ...and handed back to whatever opened it.
+    expect(document.activeElement).toBe(trigger);
   });
 });

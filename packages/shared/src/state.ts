@@ -6,7 +6,7 @@ import { z } from "zod";
 
 export type Theme = "system" | "light" | "dark";
 export type SortKey = "name" | "created" | "updated";
-export type DialogKind = "menu" | "help" | "load" | "history";
+export type DialogKind = "menu" | "help" | "load" | "history" | "settings";
 export type Panel = "chat" | "document";
 export type ListeningState = "listening" | "paused" | "muted";
 export type Author = "user" | "ai";
@@ -157,6 +157,9 @@ export interface AppState {
   chatScroll: ScrollState;
 
   chat: ChatEntry[];
+  /** An older version the AI asked to read (via read_version), surfaced into
+   * context so it can patch a fragment back in. Cleared on the next edit. */
+  readVersion: { seq: number; text: string } | null;
   /** Compacted summary of chat entries before the checkpoint, so early
    * instructions (e.g. "write in this style") survive out of the raw window. */
   chatSummary: string;
@@ -230,6 +233,7 @@ export function initialState(overrides: Partial<AppState> = {}): AppState {
     documentScroll: { ...emptyScroll },
     chatScroll: { ...emptyScroll },
     chat: [],
+    readVersion: null,
     chatSummary: "",
     chatSummarizedCount: 0,
     settings: { ...defaultSettings },

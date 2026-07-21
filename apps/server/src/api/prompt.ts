@@ -15,17 +15,18 @@ export function buildSystemPrompt(): string {
     "You never mutate the document directly. You return a JSON object { chatMessage?, actions[] } where each action is one of:",
     "- edit_text { edits: [{ find, replace, occurrence? }] } -- anchored find/replace against the current text.",
     "- insert_text { position: 'start' | 'end' | { afterFind, occurrence? }, text }",
-    "- restore_version { versionId } / restore_fragment { versionId, find, replace }",
+    "- restore_version { seq } / restore_fragment { seq, find, replace } -- seq is the version number (v0, v1, ...) shown in the edit history; the full version list is provided in context so you can pick the right one.",
+    "- read_version { seq } -- load an older version's FULL TEXT into context. To restore just part of an old version (e.g. one paragraph), you usually need its exact wording, which you cannot see: first read_version { seq }, then on the FOLLOWING turn issue restore_fragment (or edit_text) using the exact text now shown under \"Opened version\".",
     "- undo { count? } / redo { count? }",
     "- new_document { name? } / rename_document { name } / load_document { documentId?, byName?, byDate? }",
     "- scroll { target, direction, amount }",
-    "- open_dialog { dialog: 'menu' | 'help' | 'load' | 'history', sort? } / close_dialog / set_panel { panel }",
+    "- open_dialog { dialog: 'menu' | 'help' | 'load' | 'history' | 'settings', sort? } / close_dialog / set_panel { panel }",
     "- copy_document / download_document { format: 'md' | 'docx' } / download_diagnostics",
     "- set_listening { state: 'listening' | 'paused' | 'muted' }",
     "- research { queries: string[] } -- ONLY when the user explicitly asks to search the web.",
     "- clarify { question } -- prefer this over guessing on ambiguous or destructive requests.",
     "",
-    "Dialog values are exactly 'menu', 'help', 'load', 'history' -- to SHOW THE EDIT HISTORY use open_dialog { dialog: 'history' } (there is no separate edit-history action or 'edit_history' value).",
+    "Dialog values are exactly 'menu', 'help', 'load', 'history', 'settings' -- to SHOW THE EDIT HISTORY use open_dialog { dialog: 'history' }; to open SETTINGS use open_dialog { dialog: 'settings' } (there is no separate edit-history or settings action, nor an 'edit_history' value).",
     "",
     "Use chatMessage sparingly: not for routine scroll/menu/uncontroversial edits.",
     "Stopping the mic: when the speaker clearly signals they want you to stop paying attention -- e.g. 'stop listening', 'stop recording', 'pause the mic', 'hold on, I'm talking to my wife', 'give me a minute' -- emit set_listening { state: 'paused' }. This must be an EXPLICIT, unambiguous request; a bare 'stop' inside dictation, or 'stop' mid-sentence, must NOT pause.",
@@ -73,6 +74,13 @@ export function renderUserMessage(
   }
   parts.push("# Edit history", context.historySummary);
 
+  if (context.openedVersion) {
+    parts.push(
+      `# Opened version v${context.openedVersion.seq} (full text)`,
+      context.openedVersion.numberedText,
+    );
+  }
+
   parts.push("# New transcript to interpret", transcript);
 
   return parts.join("\n\n");
@@ -84,6 +92,7 @@ export function buildResearchPrompt(): string {
     "Digest them into a single concise findings note the assistant can keep in its notebook.",
     "Return the note as `chatMessage` and an empty `actions` array.",
     "Summarize the substance; do NOT paste raw page text. Attribute concrete facts to their source when useful.",
+    "Always return a NON-EMPTY note: if the pages do not answer the queries, say so plainly rather than returning nothing.",
   ].join("\n");
 }
 

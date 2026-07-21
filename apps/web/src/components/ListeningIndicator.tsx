@@ -33,7 +33,11 @@ export function ListeningIndicator() {
   };
 
   return (
-    <div className="qa-listening-indicator flex items-center gap-3 px-3 py-2 border-t border-gray-200 dark:border-gray-800">
+    <div
+      role="group"
+      aria-label="Microphone controls"
+      className="qa-listening-indicator flex items-center gap-3 px-3 py-2 border-t border-gray-200 dark:border-gray-800"
+    >
       <button
         type="button"
         onClick={toggle}

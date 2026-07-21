@@ -41,16 +41,27 @@ export const insertTextAction = z.object({
 
 export const restoreVersionAction = z.object({
   type: z.literal("restore_version"),
-  versionId: z.string().min(1),
+  // The version's seq -- the number shown in the edit history (v0, v1, ...). The
+  // model can see seqs in context but never the opaque version IDs, so it
+  // addresses versions by seq and the reducer resolves it to the version.
+  seq: z.number().int().nonnegative(),
 });
 
 export const restoreFragmentAction = z.object({
   type: z.literal("restore_fragment"),
-  versionId: z.string().min(1),
+  seq: z.number().int().nonnegative(), // version seq (see restore_version)
   // `find` locates the fragment in the CURRENT text; `replace` is the text
   // pulled from the older version. Applied like an edit, tagged as a restore.
   find: z.string().min(1),
   replace: z.string(),
+});
+
+// Load an older version's full text into context (the vision's "read an older
+// version so it can patch a specific part"). The AI reads a version, then on a
+// following turn issues restore_fragment / edit_text with the exact old text.
+export const readVersionAction = z.object({
+  type: z.literal("read_version"),
+  seq: z.number().int().nonnegative(),
 });
 
 // Relative navigation along the undo timeline. `count` supports "undo the last
@@ -98,7 +109,7 @@ export const scrollAction = z.object({
 // dialog, where it sets and persists the document sort order.
 export const openDialogAction = z.object({
   type: z.literal("open_dialog"),
-  dialog: z.enum(["menu", "help", "load", "history"]),
+  dialog: z.enum(["menu", "help", "load", "history", "settings"]),
   sort: z.enum(["name", "created", "updated"]).optional(),
 });
 
@@ -154,6 +165,7 @@ export const actionSchema = z.discriminatedUnion("type", [
   insertTextAction,
   restoreVersionAction,
   restoreFragmentAction,
+  readVersionAction,
   undoAction,
   redoAction,
   newDocumentAction,

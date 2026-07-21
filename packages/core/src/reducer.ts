@@ -8,7 +8,12 @@ import type {
   Version,
 } from "@yammer/shared";
 import { applyEdits, applyInsert, EditError } from "./edit-engine";
-import { createVersion, currentVersion, findVersion } from "./history";
+import {
+  createVersion,
+  currentVersion,
+  findVersion,
+  findVersionBySeq,
+} from "./history";
 
 // The pure reducer. Given state + one validated action, it returns the next
 // state and any Effect requests for the edges to perform. It never does I/O and
@@ -108,6 +113,8 @@ function appendVersion(
     history: [...state.history, version],
     undoStack,
     undoCursor,
+    // A committed edit consumes any version the AI had read for patching.
+    readVersion: null,
     chat: [...state.chat, chatEntryFor(version, ctx)],
   };
   return { state: next, effects: [{ type: "persist_version", version }] };
@@ -225,9 +232,9 @@ export function applyAction(
       if (!state.activeDocument) {
         return errorResult(state, ctx, "No document is open to restore.");
       }
-      const target = findVersion(state.history, action.versionId);
+      const target = findVersionBySeq(state.history, action.seq);
       if (!target) {
-        return errorResult(state, ctx, `Version not found: ${action.versionId}`);
+        return errorResult(state, ctx, `No version with sequence ${action.seq}.`);
       }
       return commitVersion(state, ctx, {
         newText: target.fullText,
@@ -241,9 +248,9 @@ export function applyAction(
       if (!state.activeDocument) {
         return errorResult(state, ctx, "No document is open to restore into.");
       }
-      const target = findVersion(state.history, action.versionId);
+      const target = findVersionBySeq(state.history, action.seq);
       if (!target) {
-        return errorResult(state, ctx, `Version not found: ${action.versionId}`);
+        return errorResult(state, ctx, `No version with sequence ${action.seq}.`);
       }
       // Provenance integrity: the restored fragment must actually be text from
       // the named version, or the audit log would record a "restore" of text
@@ -270,6 +277,24 @@ export function applyAction(
         summary: `Restored a fragment from version ${target.seq}`,
         restoredFromVersionId: target.id,
       });
+    }
+
+    case "read_version": {
+      if (!state.activeDocument) {
+        return errorResult(state, ctx, "No document is open to read a version from.");
+      }
+      const target = findVersionBySeq(state.history, action.seq);
+      if (!target) {
+        return errorResult(state, ctx, `No version with sequence ${action.seq}.`);
+      }
+      // Load the version's text into context; consumed (cleared) by the next edit.
+      return {
+        state: {
+          ...state,
+          readVersion: { seq: target.seq, text: target.fullText },
+        },
+        effects: [],
+      };
     }
 
     case "undo": {

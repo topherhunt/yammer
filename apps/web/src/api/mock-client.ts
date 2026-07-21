@@ -3,6 +3,7 @@ import type {
   LlmResult,
   Settings,
   SortKey,
+  Usage,
   Version,
 } from "@yammer/shared";
 import { zeroUsage } from "@yammer/shared";
@@ -10,6 +11,7 @@ import type {
   ApiClient,
   DocumentPayload,
   PersistUndo,
+  ResearchResult,
   TurnRequest,
 } from "./client";
 
@@ -24,6 +26,10 @@ export interface MockApiConfig {
   documents?: DocumentMeta[];
   documentPayloads?: Record<string, DocumentPayload>;
   researchSummary?: string;
+  /** Usage the research pipeline reports as billed, folded into the spend meter. */
+  researchUsage?: Usage;
+  /** Bytes the diagnostics download resolves to; defaults to a small JSON blob. */
+  diagnosticsBlob?: Blob;
   /** Called on every persistVersion attempt (1-based `attempt`) before the
    * version is recorded; throw to simulate a transient failure or a 409 (throw
    * an error carrying `.status`). Lets tests exercise the persist queue's retry
@@ -39,6 +45,12 @@ export class MockApiClient implements ApiClient {
   private documents: DocumentMeta[];
   private readonly payloads: Record<string, DocumentPayload>;
   private readonly researchSummary: string;
+  private readonly researchUsage: Usage;
+  private readonly diagnosticsBlob?: Blob;
+  /** Queries passed to research(), so tests can assert what was requested. */
+  readonly researchRequests: string[][] = [];
+  /** Document ids passed to getDiagnostics(), so tests can assert the download. */
+  readonly diagnosticsRequests: string[] = [];
 
   /** Recorded calls, so tests can assert what the edge sent to the backend. */
   readonly persistedVersions: Version[] = [];
@@ -57,6 +69,8 @@ export class MockApiClient implements ApiClient {
     this.documents = [...(config.documents ?? [])];
     this.payloads = { ...(config.documentPayloads ?? {}) };
     this.researchSummary = config.researchSummary ?? "No findings.";
+    this.researchUsage = config.researchUsage ?? zeroUsage;
+    this.diagnosticsBlob = config.diagnosticsBlob;
     this.persistFailer = config.persistFailer;
   }
 
@@ -110,13 +124,24 @@ export class MockApiClient implements ApiClient {
     this.persistedSettings.push(settings);
   }
 
-  async research(_queries: string[]): Promise<string> {
-    return this.researchSummary;
+  async research(queries: string[]): Promise<ResearchResult> {
+    this.researchRequests.push(queries);
+    return { note: this.researchSummary, usage: this.researchUsage };
   }
 
   async exportDocx(_documentId: string): Promise<Blob> {
     return new Blob(["mock-docx"], {
       type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
+  }
+
+  async getDiagnostics(documentId: string): Promise<Blob> {
+    this.diagnosticsRequests.push(documentId);
+    return (
+      this.diagnosticsBlob ??
+      new Blob([JSON.stringify({ document: documentId, turns: [], versions: [] })], {
+        type: "application/json",
+      })
+    );
   }
 }

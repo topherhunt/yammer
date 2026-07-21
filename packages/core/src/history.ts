@@ -43,3 +43,8 @@ export function currentVersion(history: Version[]): Version | null {
 export function findVersion(history: Version[], id: string): Version | null {
   return history.find((v) => v.id === id) ?? null;
 }
+
+/** Resolve a version by its seq (the number the model addresses restores by). */
+export function findVersionBySeq(history: Version[], seq: number): Version | null {
+  return history.find((v) => v.seq === seq) ?? null;
+}

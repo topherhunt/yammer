@@ -38,17 +38,27 @@ export async function handleResearch(
   }
   const queries = parsed.data.queries;
 
-  // Search each query; dedupe results by URL, preserving first-seen order.
+  // Search each query; dedupe results by URL, preserving first-seen order. A search
+  // provider rejection is surfaced as a 502 (mirrors handleTurn's LLM-failure path)
+  // rather than falling through to an opaque 500 -- the client cannot digest results
+  // it never received.
   const seen = new Set<string>();
   const collected: SearchResult[] = [];
-  for (const query of queries) {
-    const results = await deps.search.search(query);
-    for (const r of results) {
-      if (!seen.has(r.url)) {
-        seen.add(r.url);
-        collected.push(r);
+  try {
+    for (const query of queries) {
+      const results = await deps.search.search(query);
+      for (const r of results) {
+        if (!seen.has(r.url)) {
+          seen.add(r.url);
+          collected.push(r);
+        }
       }
     }
+  } catch (err) {
+    return c.json(
+      { error: `web search failed: ${err instanceof Error ? err.message : String(err)}` },
+      502,
+    );
   }
 
   // Pick the top pages (heuristic top-K; the digest step below is the load-bearing
@@ -58,26 +68,45 @@ export async function handleResearch(
     return c.json({ error: "no search results found" }, 404);
   }
 
-  // Fetch full content (inline from Tavily/Exa when present, else a fetch call).
+  // Fetch full content (inline from Tavily/Exa when present, else a fetch call). A
+  // fetch rejection is likewise a 502, not a swallowed/opaque failure.
   const pages: { title: string; url: string; content: string }[] = [];
-  for (const r of picked) {
-    const content = r.content ?? (await deps.search.fetchContent(r.url));
-    pages.push({ title: r.title, url: r.url, content });
+  try {
+    for (const r of picked) {
+      const content = r.content ?? (await deps.search.fetchContent(r.url));
+      pages.push({ title: r.title, url: r.url, content });
+    }
+  } catch (err) {
+    return c.json(
+      { error: `fetching page content failed: ${err instanceof Error ? err.message : String(err)}` },
+      502,
+    );
   }
 
-  // One summarization call that digests the pages into a single note.
+  // One summarization call that digests the pages into a single note. A provider
+  // failure here is a 502 too (nothing usable to return).
   const model = process.env.LLM_MODEL ?? "gpt-5.6-luna";
-  const llmResult = await deps.llm.complete({
-    system: buildResearchPrompt(),
-    messages: [
-      { role: "user", content: renderResearchInput(queries, pages) },
-    ],
-    model,
-  });
+  let llmResult;
+  try {
+    llmResult = await deps.llm.complete({
+      system: buildResearchPrompt(),
+      messages: [
+        { role: "user", content: renderResearchInput(queries, pages) },
+      ],
+      model,
+    });
+  } catch (err) {
+    return c.json(
+      { error: `research digest failed: ${err instanceof Error ? err.message : String(err)}` },
+      502,
+    );
+  }
 
+  // An empty/whitespace digest means the model returned nothing usable: surface it
+  // as an explicit 502 (a bad upstream response), not an opaque thrown 500.
   const note = (llmResult.chatMessage ?? "").trim();
   if (!note) {
-    throw new Error("Research summarization returned an empty note.");
+    return c.json({ error: "research digest returned an empty note" }, 502);
   }
 
   const usage: Usage = {

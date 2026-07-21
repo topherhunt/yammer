@@ -393,6 +393,21 @@ Deployed to an existing **Racknerd VPS** (ultra-budget), alongside other apps, f
 
 From the multi-agent code review. The durability/correctness/cheap-safety items were fixed immediately (client persistence retry+reconcile, turn serialization, effect error surfacing, mic-freeze guard, applyInsert ambiguity, restore_fragment provenance, undo guards, diff OOM cap, UNIQUE(doc,seq) + FKs, research fan-out cap, body-size limit, repos 0-row guard, duplicate-name uniqueness). The following are deliberately deferred to the phase where they become testable end-to-end -- recorded here so they are not forgotten.
 
+### In-browser verification checklist (first testing session)
+
+These paths are covered by unit tests through their interfaces (fakes/mocks), but their real hardware/network behavior can only be confirmed in a real browser with keys. Work through this list during testing; anything that misbehaves is a fast fix.
+
+- **Auth:** Google sign-in redirect completes on `localhost:5173` (redirect URI registered).
+- **Mic gate:** tap-to-start requests permission; granting enters "listening"; denial surfaces an error and stays gated.
+- **Real STT loop:** speech streams over the WS to OpenAI and interim/final transcripts arrive; a spoken command applies edits and persists.
+- **Vosk wake word:** the model actually LOADS on first pause (watch the console -- a model-not-found error means the tar layout is wrong; fix is `tar -czf … -C "$TMP/$MODEL" .` for archive-root files), and **"Yammer, wake up"** resumes from pause.
+- **iOS Safari (stated target):** `AudioContext` resumes inside the tap gesture -- capture is not silent and the first SFX plays.
+- **VAD + indicators:** the pulse reacts to speech; silence triggers finalize (radial); optimistic-send cancels on resumed speech.
+- **SFX:** send beep + distinct mute/unmute tones are audible.
+- **Reconnect:** a dropped STT socket surfaces a visible error and auto-reconnects (hard to trigger deliberately -- kill the server mid-session).
+- **Real backend features:** research (Tavily), export `.md`/`.docx`, and the diagnostic-log download all work against the live server + Postgres.
+- **Voice-restore:** "restore version 3" / "go back to the first version" resolve and restore; "read the earlier version, then put that paragraph back" works as a two-step.
+
 **Voice phase -- STT bridge hardening: DONE.** Auth gate before opening upstream, max-duration / idle / byte-budget / oversized-frame / per-user-concurrency caps, and buffer-until-open are implemented and unit-tested against a fake upstream (`apps/server/src/stt/bridge.ts`, env knobs in `.env.example`). Remaining small follow-ups for the live STT tuning (in-browser, with a key):
 - `stop` currently `closeBoth("done")` immediately, which can drop a trailing final transcript. Flush/commit the last utterance before closing once real endpointing is wired.
 - The frozen `SttCloseReason` enum has no concurrency value, so an over-cap socket closes with `server_error`. Consider adding a dedicated reason (e.g. `too_many_sessions`) so the client can show a precise message.
@@ -400,9 +415,9 @@ From the multi-agent code review. The durability/correctness/cheap-safety items 
 
 **Voice / correction-UX polish phase:**
 - Apply the reducer's actual per-edit ranges as discrete fading highlights (the current single-span diff over-highlights multi-region edits and collapses pure deletions to zero-width).
-- **Accessibility (high priority for an AT-dependent user):** `role="status"`/`aria-live` on the turn status and error entries so failures are announced; focus-trap + focus-restore in dialogs.
+- **Accessibility -- core pass DONE, keep extending.** Dialog focus-trap + focus-restore + `aria-modal`, `role="status"`/`aria-live` on status and error entries, and roles/labels on chat/document/indicator are implemented. Remaining: broader keyboard-shortcut coverage and a full screen-reader walkthrough.
 - **Mic stream sharing:** the main capture and the Silero VAD currently open two separate `getUserMedia` streams during listening; share one `MediaStream` between them (TODO in `mic-capture.ts`).
-- **Voice error surfacing:** `WsSttClient` errors currently `console.error` in `create-voice.ts`; route them into the chat error log via a public store voice-error channel (pairs with the accessibility `aria-live` work so STT failures are announced).
+- **Voice error surfacing -- DONE.** `WsSttClient`/mic/reconnect errors now route through the store's `pushVoiceError` into the chat error log with `aria-live` announcement (no longer just `console.error`).
 - **Wake-word footprint (Vosk is a stopgap, not ideal).** We chose Vosk (`vosk-browser`) for the wake word because it is open-source and keyless, but its ~40MB model download and general-ASR CPU cost are heavier than we'd like for a task as small as spotting one phrase. Ideally replace it with a **tiny, purpose-built, open-source keyword spotter** (Porcupine-class footprint without the key). Candidates to evaluate: **openWakeWord** (ONNX, custom-trainable, ~few-MB models; browser via `onnxruntime-web`) or a transfer-trained **TensorFlow.js `speech-commands`** model for "Yammer, wake up". Both need a small training/wiring effort, hence deferred; the `WakeWordDetector` interface makes the swap a drop-in.
 
 **Deploy-hardening phase (when the server goes live with real keys):**
@@ -411,6 +426,10 @@ From the multi-agent code review. The durability/correctness/cheap-safety items 
 - Consider a DB trigger/role denying `UPDATE`/`DELETE` on the append-only `versions`/`turns` tables (FKs added now cover referential integrity).
 - **WS `/api/stt` edge hardening:** an Origin allowlist on the upgrade (needs the prod domain), reject unauthenticated sockets before the full handshake + DB lookup (pre-auth DoS surface), and rate-limit upgrades. Plus a rolling **per-user cumulative STT spend ceiling** (today only per-session caps exist, so a looping authenticated client could sustain ongoing cost).
 - **Single shared mic MediaStream:** the mute-releases-mic privacy fix is done, but capture + VAD (+ Vosk while paused) still open separate `getUserMedia` streams during listening; share one stream. Minor edge: rapid pause->resume can briefly orphan a Vosk stream; pre-ready prebuffer streams a little leading silence (bounded).
+
+**Fixed (was a known correctness gap):** voice-restore now works -- `restore_version`/`restore_fragment` reference the version **seq** (resolved in the reducer), the full version list is surfaced in context so the model can reason about which to restore, and **`read_version { seq }`** loads an older version's full text into context so the model can patch a fragment from it (the vision's "read an older version into context" tool). Follow-up: the live-eval `restore_fragment` case is single-turn and may now (correctly) register the model choosing `read_version` first; tune that case for the two-step flow on the next live run.
+
+**Minor non-headline gap (optional):** changing an individual setting *by voice* ("switch to dark mode") is not wired -- there is no `set_setting`-style action, only `open_dialog{settings}` to open the panel (whose controls are click/keyboard). Add a settings-mutation action if voice control of settings is wanted.
 
 **Accepted tradeoff (documented, not a bug):**
 - With the client-authoritative design, `/api/documents/:id/versions` trusts client-supplied version *content* (`fullText`, `author`, `kind`, `diff`). The server guarantees only monotonic seq + ownership + referential integrity, not that a version is a genuine reducer output. Acceptable for a single-user tool; revisit if the trust model ever changes.

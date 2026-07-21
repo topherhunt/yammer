@@ -41,4 +41,35 @@ describe("ChatSidebar", () => {
     // 100*$1/1M + 900*$0.10/1M + 100*$6/1M = $0.00079.
     expect(container.querySelector(".qa-spend-usd")?.textContent).toBe("$0.0008");
   });
+
+  it("folds a research turn's usage into the spend meter alongside LLM turns", async () => {
+    const { container, store } = renderWithStore(<ChatSidebar />, {
+      initial: {
+        activeDocument: { id: "d1", name: "Doc", text: "x", currentVersionId: "v0", currentSeq: 0 },
+        history: [],
+        undoStack: [],
+        undoCursor: -1,
+      },
+      api: {
+        researchSummary: "Findings.",
+        researchUsage: { sttSeconds: 0, inputTokens: 300, cachedInputTokens: 0, outputTokens: 40 },
+      },
+    });
+
+    // Seed a prior LLM-turn usage, then run a research turn.
+    act(() => {
+      store.setState({
+        usages: [{ sttSeconds: 0, inputTokens: 100, cachedInputTokens: 0, outputTokens: 10 }],
+      });
+    });
+    await act(async () => {
+      store.getState().dispatch({ type: "research", queries: ["q"] });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // 100+10 (turn) + 300+40 (research) = 450 tokens summed into the meter.
+    expect(container.querySelector(".qa-spend-tokens")?.textContent).toBe("450 tokens");
+    // And the digested note is rendered as a research entry.
+    expect(container.querySelector(".qa-chat-research")?.textContent).toContain("Findings.");
+  });
 });

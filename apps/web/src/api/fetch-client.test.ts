@@ -52,6 +52,7 @@ const emptyContext: SituationalContext = {
   chatSummary: "",
   recentChat: [],
   historySummary: "",
+  openedVersion: null,
 };
 
 describe("FetchApiClient.turn", () => {
@@ -254,19 +255,42 @@ describe("FetchApiClient.persistSettings", () => {
 });
 
 describe("FetchApiClient.research", () => {
-  it("POSTs queries and returns only the digested note", async () => {
+  it("POSTs queries and returns the digested note plus its billed usage", async () => {
+    const usage = { sttSeconds: 0, inputTokens: 800, cachedInputTokens: 0, outputTokens: 120 };
     const { calls } = stubFetch({
       "POST /api/research": {
         note: "Digest of findings.",
         sources: [{ title: "T", url: "https://x" }],
-        usage: {},
+        usage,
       },
     });
     const client = new FetchApiClient(BASE);
 
-    const note = await client.research(["als assistive tech"]);
-    expect(note).toBe("Digest of findings.");
+    const result = await client.research(["als assistive tech"]);
+    expect(result.note).toBe("Digest of findings.");
+    // Usage is threaded through so the store can fold it into the spend meter.
+    expect(result.usage).toEqual(usage);
     expect(calls[0]!.body).toEqual({ queries: ["als assistive tech"] });
+  });
+});
+
+describe("FetchApiClient.getDiagnostics", () => {
+  it("GETs the diagnostic log as a Blob with credentials", async () => {
+    const { calls } = stubFetch({
+      "GET /api/documents/d1/diagnostics": { document: "d1", turns: [], versions: [] },
+    });
+    const client = new FetchApiClient(BASE);
+
+    const blob = await client.getDiagnostics("d1");
+    expect(blob).toBeInstanceOf(Blob);
+    expect(calls[0]!.url).toBe("https://api.test/api/documents/d1/diagnostics");
+    expect(calls[0]!.credentials).toBe("include");
+  });
+
+  it("throws on a non-2xx response instead of downloading nothing", async () => {
+    stubFetch({}); // 404s
+    const client = new FetchApiClient(BASE);
+    await expect(client.getDiagnostics("d1")).rejects.toThrow(/diagnostics download failed: 404/);
   });
 });
 

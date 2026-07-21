@@ -9,6 +9,7 @@ import type {
   ListeningState,
   LlmResponse,
   ScrollState,
+  Settings,
   SfxSound,
   SttProvider,
   Usage,
@@ -81,6 +82,11 @@ export interface AppStore {
   setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
   /** Apply one action from a UI control (default author "user"). */
   dispatch: (action: Action, author?: Author) => void;
+  /** Update one or more settings from the Settings dialog: merge into
+   * app.settings (applied immediately -- e.g. theme via useTheme) and persist via
+   * the persist_settings effect. Not routed through the reducer/Action protocol
+   * because settings are edge/user-preference state, not an LLM-emitted action. */
+  updateSettings: (patch: Partial<Settings>) => void;
   /** Apply a validated LLM turn (author "ai") and record its usage. */
   applyResponse: (response: LlmResponse, usage?: Usage) => void;
   /** Send a finished transcript through the turn loop (append user message,
@@ -371,8 +377,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     }
 
     async function handleResearch(queries: string[]): Promise<void> {
-      const summary = await deps.api.research(queries);
-      pushEntry({ kind: "research", id: newId(), at: now(), summary });
+      // The reducer already pushed "Searching the web…" when the research action
+      // ran; stage the next status before the (single) server round-trip that
+      // reads + digests, then land the digested note as a research entry. Its
+      // billed usage is folded into the spend meter exactly like a turn's usage.
+      pushEntry({ kind: "thinking", id: newId(), at: now(), status: "Reading results…" });
+      const { note, usage } = await deps.api.research(queries);
+      pushEntry({ kind: "research", id: newId(), at: now(), summary: note });
+      set((s) => ({ usages: [...s.usages, usage] }));
     }
 
     async function handleExport(
@@ -390,18 +402,22 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       downloadFile(`${safeName}.docx`, blob, blob.type);
     }
 
-    function handleDiagnostics(): void {
-      const s = get();
-      const doc = s.app.activeDocument;
-      const payload = {
-        document: doc ? { id: doc.id, name: doc.name } : null,
-        exportedAt: now(),
-        usages: s.usages,
-        history: s.app.history,
-        chat: s.app.chat,
-      };
-      const name = doc ? doc.name.replace(/[^\w.-]+/g, "_") : "diagnostics";
-      downloadFile(`${name}-diagnostics.json`, JSON.stringify(payload, null, 2), "application/json");
+    async function handleDiagnostics(documentId: string): Promise<void> {
+      // GET the authoritative diagnostic log from the server (transcripts -> raw
+      // LLM responses -> actions + full version history) and trigger a browser
+      // file download. A failure surfaces through runGuarded into the chat/voice
+      // error channel rather than silently dropping.
+      const blob = await deps.api.getDiagnostics(documentId);
+      const doc = get().app.activeDocument;
+      const base =
+        doc && doc.id === documentId
+          ? doc.name.replace(/[^\w.-]+/g, "_") || "document"
+          : "diagnostics";
+      downloadFile(
+        `${base}-diagnostics.json`,
+        blob,
+        blob.type || "application/json",
+      );
     }
 
     function applyListening(state: AppState["listening"]): void {
@@ -476,7 +492,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             );
             break;
           case "download_diagnostics":
-            handleDiagnostics();
+            runGuarded("Downloading the diagnostic log", () =>
+              handleDiagnostics(effect.documentId),
+            );
             break;
         }
       }
@@ -663,6 +681,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       },
 
       applyResponse,
+
+      updateSettings(patch) {
+        const settings: Settings = { ...get().app.settings, ...patch };
+        set((s) => ({ app: { ...s.app, settings } }));
+        // Fire the same persist_settings effect the reducer emits for the load
+        // sort, so settings-dialog changes are durably saved.
+        runEffects([{ type: "persist_settings", settings }]);
+      },
 
       submitTranscript(text, sttSeconds) {
         const trimmed = text.trim();

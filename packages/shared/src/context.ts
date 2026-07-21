@@ -25,6 +25,9 @@ export interface SituationalContext {
   recentChat: { role: string; text: string }[];
   /** Compacted summary of edit history (not every diff). */
   historySummary: string;
+  /** An older version the AI asked to read (read_version), with its full text,
+   * so it can patch a fragment back in. Null unless a version was just read. */
+  openedVersion: { seq: number; numberedText: string } | null;
 }
 
 /**
@@ -46,7 +49,7 @@ export const situationalContextSchema = z.object({
     .nullable(),
   openDialog: z
     .object({
-      kind: z.enum(["menu", "help", "load", "history"]),
+      kind: z.enum(["menu", "help", "load", "history", "settings"]),
       contents: z.string(),
     })
     .nullable(),
@@ -55,6 +58,9 @@ export const situationalContextSchema = z.object({
   chatSummary: z.string(),
   recentChat: z.array(z.object({ role: z.string(), text: z.string() })),
   historySummary: z.string(),
+  openedVersion: z
+    .object({ seq: z.number(), numberedText: z.string() })
+    .nullable(),
 });
 
 // Compile-time guard that schema and interface stay consistent in both directions

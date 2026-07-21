@@ -56,4 +56,13 @@ describe("assembleContext", () => {
     expect(ctx.historySummary).toContain("v1");
     expect(ctx.historySummary).toContain("edit");
   });
+
+  it("surfaces an opened (read) version's full text for patching", () => {
+    const state = docState("current text", {
+      readVersion: { seq: 2, text: "line a\nline b" },
+    });
+    const ctx = assembleContext(state);
+    expect(ctx.openedVersion?.seq).toBe(2);
+    expect(ctx.openedVersion?.numberedText).toContain("line a");
+  });
 });

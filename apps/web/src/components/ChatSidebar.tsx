@@ -89,6 +89,12 @@ export function ChatSidebar() {
     <div className="flex h-full flex-col">
       <ul
         ref={listRef}
+        // role="log" marks this as the running conversation transcript, so AT
+        // treats it as a live region (new dictation/AI/edit entries are announced)
+        // without competing with the assertive per-error aria-live entries.
+        role="log"
+        aria-label="Conversation"
+        aria-live="polite"
         className={cx("qa-chat-list flex flex-1 flex-col gap-2 overflow-y-auto p-3")}
       >
         {chat.length === 0 ? (

@@ -1,5 +1,11 @@
 import { beforeAll, describe, it, expect } from "vitest";
-import type { AppState, SituationalContext, Version } from "@yammer/shared";
+import type {
+  AppState,
+  SearchProvider,
+  SearchResult,
+  SituationalContext,
+  Version,
+} from "@yammer/shared";
 import { initialState } from "@yammer/shared";
 import { assembleContext } from "@yammer/core";
 import { eq } from "drizzle-orm";
@@ -655,6 +661,185 @@ describe("POST /api/research", () => {
     });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { note: string }).note).toBe("Digested note.");
+  });
+
+  it("dedupes results by URL across queries, digesting each URL only once", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    // The same two results come back for BOTH queries. After dedupe the note must
+    // cite each URL exactly once -- the duplicate second-query hits are dropped.
+    const search = new FakeSearch([
+      { title: "A", url: "https://ex.com/a", snippet: "s", content: "BODY-A" },
+      { title: "B", url: "https://ex.com/b", snippet: "s", content: "BODY-B" },
+    ]);
+    const llm = new FakeLlm([llmResult([], { chatMessage: "Merged digest." })]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["als tech", "als devices"] }),
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as { sources: { url: string }[] };
+    // Both queries were searched, but the two URLs appear once each (not four rows).
+    expect(search.searched).toEqual(["als tech", "als devices"]);
+    expect(out.sources.map((s) => s.url)).toEqual(["https://ex.com/a", "https://ex.com/b"]);
+  });
+
+  it("caps the digested pages to MAX_PAGES (3) even when more results come back", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    // Five distinct results; only the first three may be fetched + summarized.
+    const search = new FakeSearch(
+      Array.from({ length: 5 }, (_, i) => ({
+        title: `T${i}`,
+        url: `https://ex.com/${i}`,
+        snippet: "s",
+        content: `BODY-${i}`,
+      })),
+    );
+    const llm = new FakeLlm([llmResult([], { chatMessage: "Top-three digest." })]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["broad query"] }),
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as { sources: { url: string }[] };
+    // Exactly the first three URLs are cited; results 4 and 5 are dropped by the cap.
+    expect(out.sources.map((s) => s.url)).toEqual([
+      "https://ex.com/0",
+      "https://ex.com/1",
+      "https://ex.com/2",
+    ]);
+    // Only one digest LLM call was made over those three pages.
+    expect(llm.requests).toHaveLength(1);
+  });
+
+  it("returns ONLY the note, sources, and usage -- no raw pages or extra fields", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const search = new FakeSearch([
+      { title: "Only", url: "https://ex.com/only", snippet: "s", content: "SECRET-BODY" },
+    ]);
+    const llm = new FakeLlm([
+      llmResult([], {
+        chatMessage: "The findings note.",
+        usage: { inputTokens: 40, cachedInputTokens: 10, outputTokens: 8 },
+      }),
+    ]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["q"] }),
+    });
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as {
+      note: string;
+      sources: { title: string; url: string }[];
+      usage: { sttSeconds: number; inputTokens: number; cachedInputTokens: number; outputTokens: number };
+    };
+    // The response surface is exactly these three keys -- nothing leaks the raw page.
+    expect(Object.keys(out).sort()).toEqual(["note", "sources", "usage"]);
+    expect(out.note).toBe("The findings note.");
+    expect(out.sources).toEqual([{ title: "Only", url: "https://ex.com/only" }]);
+    // usage is the LLM digest's token spend, with sttSeconds pinned to 0 (no audio).
+    expect(out.usage).toEqual({ sttSeconds: 0, inputTokens: 40, cachedInputTokens: 10, outputTokens: 8 });
+    expect(JSON.stringify(out)).not.toContain("SECRET-BODY");
+  });
+
+  it("returns 404 when the search yields no results, never calling the digest LLM", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const search = new FakeSearch([]); // every query comes back empty
+    const llm = new FakeLlm([]); // drained: a digest call would throw
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["nothing matches this"] }),
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toMatch(/no search results/);
+    // The search WAS attempted, but no page was digested (LLM untouched).
+    expect(search.searched).toEqual(["nothing matches this"]);
+    expect(llm.requests).toHaveLength(0);
+  });
+
+  it("surfaces an empty digest note as a 502, not an opaque 500", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const search = new FakeSearch([
+      { title: "T", url: "https://ex.com/a", snippet: "s", content: "BODY" },
+    ]);
+    // The model returns only whitespace -> nothing usable to digest.
+    const llm = new FakeLlm([llmResult([], { chatMessage: "   " })]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["q"] }),
+    });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/empty note/);
+  });
+
+  it("maps a search-provider rejection to a 502, not an unhandled 500", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    // A provider whose search() rejects (e.g. Tavily down). The digest LLM is drained
+    // so it would throw if reached -- proving the failure is caught at the search step.
+    const boomSearch: SearchProvider = {
+      search: async () => {
+        throw new Error("tavily upstream 503");
+      },
+      fetchContent: async () => "unused",
+    };
+    const llm = new FakeLlm([]);
+    const app = buildApp({ repos, llm, search: boomSearch });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["als"] }),
+    });
+    expect(res.status).toBe(502);
+    const out = (await res.json()) as { error: string };
+    expect(out.error).toMatch(/web search failed/);
+    expect(out.error).toMatch(/tavily upstream 503/);
+    expect(llm.requests).toHaveLength(0);
+  });
+
+  it("maps a fetchContent rejection (page with no inline content) to a 502", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    // Result has NO inline content, so the handler falls back to fetchContent -- which
+    // here rejects. That must surface as a 502, not an opaque 500.
+    const results: SearchResult[] = [{ title: "T", url: "https://ex.com/a", snippet: "s" }];
+    const boomFetch: SearchProvider = {
+      search: async () => results,
+      fetchContent: async () => {
+        throw new Error("extractor timeout");
+      },
+    };
+    const llm = new FakeLlm([]);
+    const app = buildApp({ repos, llm, search: boomFetch });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["q"] }),
+    });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/fetching page content failed/);
+    expect(llm.requests).toHaveLength(0);
   });
 });
 

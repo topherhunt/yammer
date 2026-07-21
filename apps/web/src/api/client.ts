@@ -5,6 +5,7 @@ import type {
   Settings,
   SituationalContext,
   SortKey,
+  Usage,
   Version,
 } from "@yammer/shared";
 
@@ -28,6 +29,14 @@ export interface TurnRequest {
 export interface DocumentPayload {
   document: ActiveDocument;
   history: Version[];
+}
+
+/** The digested research result: only the notebook note plus its billed usage
+ * (raw pages never cross this seam). The usage is folded into the spend meter
+ * exactly like a turn's usage. */
+export interface ResearchResult {
+  note: string;
+  usage: Usage;
 }
 
 /** The client's undo timeline, persisted alongside each version (N3). */
@@ -68,8 +77,13 @@ export interface ApiClient {
   persistVersion(version: Version, undo?: PersistUndo): Promise<void>;
   persistSettings(settings: Settings): Promise<void>;
 
-  /** Runs the server research pipeline; returns only the digested findings note. */
-  research(queries: string[]): Promise<string>;
+  /** Runs the server research pipeline; returns only the digested findings note
+   * plus the call's billed usage (folded into the spend meter). */
+  research(queries: string[]): Promise<ResearchResult>;
   /** Server-rendered .docx bytes (marked -> HTML -> html-to-docx). */
   exportDocx(documentId: string): Promise<Blob>;
+  /** GET /api/documents/:id/diagnostics -- the serialized diagnostic log
+   * (transcripts -> raw LLM responses -> actions + full version history) as a
+   * downloadable JSON blob. Mirrors exportDocx (bytes, not parsed JSON). */
+  getDiagnostics(documentId: string): Promise<Blob>;
 }

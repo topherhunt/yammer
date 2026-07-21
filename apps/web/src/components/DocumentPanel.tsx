@@ -131,7 +131,14 @@ export function DocumentPanel() {
       <div className="qa-document-name border-b border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 dark:border-gray-800 dark:text-gray-200">
         {doc ? doc.name : "No document"}
       </div>
-      <div ref={hostRef} className="qa-document-editor flex-1 overflow-auto" />
+      <div
+        ref={hostRef}
+        // The editable document region. CodeMirror renders its own textbox
+        // inside; labelling the region names it for assistive tech.
+        role="region"
+        aria-label={doc ? `Document: ${doc.name}` : "Document editor"}
+        className="qa-document-editor flex-1 overflow-auto"
+      />
     </div>
   );
 }

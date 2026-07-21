@@ -31,14 +31,23 @@ function chatText(entry: ChatEntry): { role: string; text: string } {
   }
 }
 
+// Cap on how many versions to list verbatim. The lines are short (~one per
+// version), so this is cheap; older versions beyond it are summarized by count.
+// The model needs this full-ish list to reason about which version to restore
+// ("the version before I edited this paragraph") and to reference it by seq.
+const MAX_HISTORY_LINES = 100;
+
 function summarizeHistory(state: AppState): string {
   if (state.history.length === 0) return "No edits yet.";
-  const last = state.history.slice(-5);
-  const lines = last.map((v) => `v${v.seq} (${v.author}, ${v.kind}): ${v.summary}`);
+  const shown = state.history.slice(-MAX_HISTORY_LINES);
+  const omitted = state.history.length - shown.length;
+  const lines = shown.map(
+    (v) => `v${v.seq} (${v.author}, ${v.kind}): ${v.summary}`,
+  );
   const prefix =
-    state.history.length > last.length
-      ? `${state.history.length} versions total; most recent:\n`
-      : "";
+    omitted > 0
+      ? `${state.history.length} versions total; the ${omitted} oldest are omitted. Restore any listed version by its seq:\n`
+      : `${state.history.length} version(s). Restore any by its seq:\n`;
   return prefix + lines.join("\n");
 }
 
@@ -60,6 +69,8 @@ function dialogContents(state: AppState): string {
       return "Menu: New document, Load document, Rename, Edit history, Help, Download diagnostic log.";
     case "help":
       return "Help: speak naturally to write, edit, navigate, or research. Say an explicit phrase like \"stop listening\" to pause; say \"Yammer, wake up\" to resume.";
+    case "settings":
+      return `Settings: theme (${state.settings.theme}), sound effects ${state.settings.sfxEnabled ? "on" : "off"}. The user can change these here or by voice.`;
     case null:
       return "";
   }
@@ -91,5 +102,11 @@ export function assembleContext(state: AppState): SituationalContext {
     // advances as the edge folds older chat into chatSummary, bounding this window.
     recentChat: state.chat.slice(state.chatSummarizedCount).map(chatText),
     historySummary: summarizeHistory(state),
+    openedVersion: state.readVersion
+      ? {
+          seq: state.readVersion.seq,
+          numberedText: numberLines(state.readVersion.text),
+        }
+      : null,
   };
 }

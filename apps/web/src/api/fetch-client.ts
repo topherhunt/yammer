@@ -4,10 +4,17 @@ import type {
   LlmResult,
   Settings,
   SortKey,
+  Usage,
   Version,
 } from "@yammer/shared";
 import { ApiError } from "./client";
-import type { ApiClient, DocumentPayload, PersistUndo, TurnRequest } from "./client";
+import type {
+  ApiClient,
+  DocumentPayload,
+  PersistUndo,
+  ResearchResult,
+  TurnRequest,
+} from "./client";
 
 // The real backend client: a thin HTTP wrapper over apps/server's routes. The
 // server is a THIN RELAY for turns and the authoritative store for documents;
@@ -19,7 +26,7 @@ import type { ApiClient, DocumentPayload, PersistUndo, TurnRequest } from "./cli
 interface ResearchResponse {
   note: string;
   sources: { title: string; url: string }[];
-  usage: unknown;
+  usage: Usage;
 }
 
 export class FetchApiClient implements ApiClient {
@@ -133,12 +140,12 @@ export class FetchApiClient implements ApiClient {
     await this.requestJson("/api/settings", this.jsonInit("PUT", { settings }));
   }
 
-  async research(queries: string[]): Promise<string> {
-    const { note } = await this.requestJson<ResearchResponse>(
+  async research(queries: string[]): Promise<ResearchResult> {
+    const { note, usage } = await this.requestJson<ResearchResponse>(
       "/api/research",
       this.jsonInit("POST", { queries }),
     );
-    return note;
+    return { note, usage };
   }
 
   async exportDocx(documentId: string): Promise<Blob> {
@@ -148,6 +155,19 @@ export class FetchApiClient implements ApiClient {
     );
     if (!res.ok) {
       throw new Error(`export docx failed: ${res.status} ${res.statusText}`);
+    }
+    return res.blob();
+  }
+
+  async getDiagnostics(documentId: string): Promise<Blob> {
+    const res = await fetch(
+      this.url(`/api/documents/${documentId}/diagnostics`),
+      { credentials: "include" },
+    );
+    if (!res.ok) {
+      throw new Error(
+        `diagnostics download failed: ${res.status} ${res.statusText}`,
+      );
     }
     return res.blob();
   }

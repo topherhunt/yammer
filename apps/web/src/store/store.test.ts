@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppState } from "@yammer/shared";
 import { createVersion } from "@yammer/core";
 import { MockApiClient } from "../api/mock-client";
@@ -182,7 +182,7 @@ describe("dialog + document effects", () => {
     store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
     expect(store.getState().app.activeDocument?.text).toBe("the dog sat");
 
-    store.getState().dispatch({ type: "restore_version", versionId: "v0" });
+    store.getState().dispatch({ type: "restore_version", seq: 0 });
     const app = store.getState().app;
     expect(app.activeDocument?.text).toBe("the cat sat");
     expect(app.chat.at(-1)?.kind).toBe("restore");
@@ -527,5 +527,93 @@ describe("effect failure surfacing", () => {
 
     expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
     expect(store.getState().lastError).toMatch(/loading the document/i);
+  });
+});
+
+describe("research turn UX", () => {
+  it("stages thinking-status, lands the digested note, and folds usage into the meter", async () => {
+    const researchUsage = {
+      sttSeconds: 0,
+      inputTokens: 500,
+      cachedInputTokens: 0,
+      outputTokens: 80,
+    };
+    const { store } = makeStore({
+      initial: openDocState,
+      api: { researchSummary: "ALS AAC devices summary.", researchUsage },
+    });
+
+    // The research action is what the LLM (or a UI control) dispatches.
+    store.getState().dispatch({ type: "research", queries: ["als aac"] });
+    await flush();
+
+    const chat = store.getState().app.chat;
+    // Staged thinking status: reducer emits "Searching…", the effect emits "Reading…".
+    const statuses = chat
+      .filter((e) => e.kind === "thinking")
+      .map((e) => (e as { status: string }).status);
+    expect(statuses).toEqual(["Searching the web…", "Reading results…"]);
+
+    // The digested note lands as a research entry (not raw pages).
+    const research = chat.find((e) => e.kind === "research");
+    expect(research).toMatchObject({ kind: "research", summary: "ALS AAC devices summary." });
+
+    // Research usage is folded into the spend-meter totals just like a turn.
+    expect(store.getState().usages).toContainEqual(researchUsage);
+  });
+
+  it("surfaces an error (not a silent drop) when the research call fails", async () => {
+    const { store, api } = makeStore({ initial: openDocState });
+    api.research = () => Promise.reject(new Error("tavily down"));
+
+    store.getState().dispatch({ type: "research", queries: ["x"] });
+    await flush();
+
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+    expect(store.getState().lastError).toMatch(/research/i);
+  });
+});
+
+describe("diagnostic-log download", () => {
+  it("GETs the diagnostic log for the active document and triggers a file download", async () => {
+    const createURL = vi.fn((_blob: Blob) => "blob:diag");
+    const revokeURL = vi.fn();
+    (URL as unknown as { createObjectURL: unknown }).createObjectURL = createURL;
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = revokeURL;
+    const downloads: string[] = [];
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        downloads.push(this.download);
+      });
+
+    try {
+      const { store, api } = makeStore({ initial: openDocState });
+      store.getState().dispatch({ type: "download_diagnostics" });
+      await flush();
+
+      // The server endpoint was hit for the active document...
+      expect(api.diagnosticsRequests).toEqual(["d1"]);
+      // ...and a blob object URL + anchor download were triggered.
+      expect(createURL).toHaveBeenCalledTimes(1);
+      expect(createURL.mock.calls[0]![0]).toBeInstanceOf(Blob);
+      expect(downloads).toEqual(["Doc-diagnostics.json"]);
+      expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(false);
+    } finally {
+      clickSpy.mockRestore();
+      delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    }
+  });
+
+  it("surfaces an error in the chat channel when the diagnostics download fails", async () => {
+    const { store, api } = makeStore({ initial: openDocState });
+    api.getDiagnostics = () => Promise.reject(new Error("network down"));
+
+    store.getState().dispatch({ type: "download_diagnostics" });
+    await flush();
+
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+    expect(store.getState().lastError).toMatch(/diagnostic log/i);
   });
 });

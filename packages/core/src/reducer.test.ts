@@ -78,7 +78,7 @@ describe("restore_version", () => {
 
     const { state, effects } = applyAction(
       edited,
-      { type: "restore_version", versionId: "v0" },
+      { type: "restore_version", seq: 0 },
       makeCtx("ai"),
     );
 
@@ -91,10 +91,10 @@ describe("restore_version", () => {
     expect(effectTypes(effects)).toEqual(["persist_version"]);
   });
 
-  it("errors on an unknown version id", () => {
+  it("errors on an unknown version seq", () => {
     const { state } = applyAction(
       docState("x"),
-      { type: "restore_version", versionId: "ghost" },
+      { type: "restore_version", seq: 99 },
       makeCtx("ai"),
     );
     expect(lastChat(state.chat).kind).toBe("error");
@@ -108,7 +108,7 @@ describe("restore_fragment", () => {
     s = applyAction(s, { type: "edit_text", edits: [{ find: "that", replace: "this" }] }, c).state;
     const { state } = applyAction(
       s,
-      { type: "restore_fragment", versionId: "v0", find: "this", replace: "that" },
+      { type: "restore_fragment", seq: 0, find: "this", replace: "that" },
       c,
     );
     expect(state.activeDocument?.text).toBe("keep that line");
@@ -118,11 +118,40 @@ describe("restore_fragment", () => {
   it("rejects a fragment restore whose text was never in that version", () => {
     const { state } = applyAction(
       docState("keep this line"), // v0 never contained "nonsense"
-      { type: "restore_fragment", versionId: "v0", find: "this", replace: "nonsense" },
+      { type: "restore_fragment", seq: 0, find: "this", replace: "nonsense" },
       makeCtx("ai"),
     );
     expect(lastChat(state.chat).kind).toBe("error");
     expect(state.activeDocument?.text).toBe("keep this line"); // unchanged
+  });
+});
+
+describe("read_version", () => {
+  it("loads an older version's full text into context for patching", () => {
+    const c = makeCtx("ai");
+    let s = docState("original");
+    s = applyAction(s, { type: "insert_text", position: "end", text: " edited" }, c).state;
+    const { state } = applyAction(s, { type: "read_version", seq: 0 }, c);
+    expect(state.readVersion).toEqual({ seq: 0, text: "original" });
+  });
+
+  it("errors on an unknown version seq and leaves nothing read", () => {
+    const { state } = applyAction(
+      docState("x"),
+      { type: "read_version", seq: 99 },
+      makeCtx("ai"),
+    );
+    expect(lastChat(state.chat).kind).toBe("error");
+    expect(state.readVersion).toBeNull();
+  });
+
+  it("clears the read version once an edit is committed (read is consumed)", () => {
+    const c = makeCtx("ai");
+    let s = docState("hello");
+    s = applyAction(s, { type: "read_version", seq: 0 }, c).state;
+    expect(s.readVersion).not.toBeNull();
+    s = applyAction(s, { type: "insert_text", position: "end", text: "!" }, c).state;
+    expect(s.readVersion).toBeNull();
   });
 });
 
