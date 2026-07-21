@@ -53,10 +53,13 @@ export function createVoice(
     // store's public voice-error channel (shown + announced via aria-live).
     onError: (message) => store.getState().pushVoiceError(message),
   });
-  // Open-source, keyless Vosk spotter for "Yammer, wake up". The model URL is
-  // configurable; place a small Vosk model .tar.gz at the default public path.
+  // Open-source, keyless Vosk spotter for "Yammer, wake up". The model URL and
+  // the per-word confidence threshold are configurable via env so the wake
+  // sensitivity can be tuned (VITE_VOSK_MIN_CONFIDENCE, 0..1) without a rebuild.
+  const minConfidence = import.meta.env.VITE_VOSK_MIN_CONFIDENCE;
   const wakeWord = new VoskWakeWord({
     modelUrl: import.meta.env.VITE_VOSK_MODEL_URL,
+    ...(minConfidence ? { minConfidence: Number(minConfidence) } : {}),
   });
 
   const controller = new VoiceController({

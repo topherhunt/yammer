@@ -23,19 +23,37 @@ const DEFAULT_MODEL_URL = "/models/vosk-model-small-en-us.tar.gz";
 const WAKE_PHRASE = "yammer wake up";
 const GRAMMAR = JSON.stringify([WAKE_PHRASE, "[unk]"]);
 
-/** True when the heard text is (loosely) the wake phrase. */
-function isWakeMatch(text: string): boolean {
-  const t = text.toLowerCase();
-  return t.includes("yammer") && t.includes("wake");
+// Minimum per-word confidence to accept a wake. The grammar makes even a weak
+// "yam" transcribe as the full phrase, but the words you did not actually say
+// come back with low confidence -- so this is the real false-wake filter. Tune
+// UP to be stricter (fewer false wakes, more misses on an unclear voice); tune
+// DOWN if the real phrase is being missed.
+const DEFAULT_MIN_CONFIDENCE = 0.4;
+
+interface VoskResult {
+  text: string;
+  result?: Array<{ conf: number; word: string }>;
+}
+
+/** Accept only when the recognized text IS the wake phrase and every recognized
+ * word clears the confidence bar. Uses the min (every) rather than average so a
+ * single confidently-absent word ("wake"/"up" you didn't say) blocks the wake. */
+function isConfidentWake(result: VoskResult, minConfidence: number): boolean {
+  if (!result.text.toLowerCase().includes(WAKE_PHRASE)) return false;
+  const words = result.result ?? [];
+  return words.length > 0 && words.every((w) => w.conf >= minConfidence);
 }
 
 export interface VoskWakeWordOptions {
   /** URL of a Vosk model .tar.gz (host it in the web app's public dir). */
   modelUrl?: string;
+  /** Per-word confidence bar for a wake (0..1). Default 0.7. */
+  minConfidence?: number;
 }
 
 export class VoskWakeWord implements WakeWordDetector {
   private readonly modelUrl: string;
+  private readonly minConfidence: number;
   private readonly cbs: Array<() => void> = [];
 
   private running = false;
@@ -50,6 +68,7 @@ export class VoskWakeWord implements WakeWordDetector {
 
   constructor(options: VoskWakeWordOptions = {}) {
     this.modelUrl = options.modelUrl ?? DEFAULT_MODEL_URL;
+    this.minConfidence = options.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
   }
 
   onDetected(cb: () => void): void {
@@ -91,11 +110,10 @@ export class VoskWakeWord implements WakeWordDetector {
     const recognizer = new model.KaldiRecognizer(audio.sampleRate, GRAMMAR);
     this.recognizer = recognizer;
 
+    // Only final results -- partials are unstable and cause premature wakes on a
+    // fleeting "yam". The final result carries per-word confidence for the gate.
     recognizer.on("result", (message) => {
-      if (message.event === "result") this.consider(message.result.text);
-    });
-    recognizer.on("partialresult", (message) => {
-      if (message.event === "partialresult") this.consider(message.result.partial);
+      if (message.event === "result") this.consider(message.result);
     });
 
     const source = audio.createMediaStreamSource(stream);
@@ -116,8 +134,8 @@ export class VoskWakeWord implements WakeWordDetector {
     processor.connect(audio.destination);
   }
 
-  private consider(text: string): void {
-    if (this.running && text && isWakeMatch(text)) {
+  private consider(result: VoskResult): void {
+    if (this.running && isConfidentWake(result, this.minConfidence)) {
       // Fire once per activation; stop() before re-arming on the next pause.
       this.stop();
       for (const cb of this.cbs) cb();

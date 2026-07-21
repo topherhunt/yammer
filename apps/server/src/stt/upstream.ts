@@ -25,14 +25,11 @@ export interface OpenAiUpstreamOptions {
  */
 export function openOpenAiUpstream(opts: OpenAiUpstreamOptions): SttUpstream {
   const model = opts.model ?? "gpt-realtime-whisper";
+  // GA Realtime API: /v1/realtime, NO "OpenAI-Beta" header (that is the removed
+  // beta path), and a session.update with session.type "transcription".
   const socket = new WebSocket(
     "wss://api.openai.com/v1/realtime?intent=transcription",
-    {
-      headers: {
-        Authorization: `Bearer ${opts.apiKey}`,
-        "OpenAI-Beta": "realtime=v1",
-      },
-    },
+    { headers: { Authorization: `Bearer ${opts.apiKey}` } },
   );
 
   // Configure the transcription session as soon as the socket opens, before the
@@ -40,11 +37,15 @@ export function openOpenAiUpstream(opts: OpenAiUpstreamOptions): SttUpstream {
   socket.on("open", () => {
     socket.send(
       JSON.stringify({
-        type: "transcription_session.update",
+        type: "session.update",
         session: {
-          input_audio_format: "pcm16",
-          input_audio_transcription: { model },
-          // Endpointing + latency tuning is finalized in the live voice build.
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: opts.sampleRate },
+              transcription: { model, language: "en" },
+            },
+          },
         },
       }),
     );

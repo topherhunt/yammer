@@ -32,8 +32,13 @@ function floatToPcm16(frame: Float32Array): Int16Array {
   return out;
 }
 
+// OpenAI GA realtime transcription requires exactly 24 kHz mono PCM, so we force
+// the capture graph to 24 kHz (the browser resamples the mic input for us) rather
+// than streaming the hardware rate (typically 48 kHz) and being rejected.
+const STT_SAMPLE_RATE = 24000;
+
 export class BrowserMicCapture implements MicCapture {
-  sampleRate = 16000;
+  sampleRate = STT_SAMPLE_RATE;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private node: AudioWorkletNode | null = null;
@@ -43,7 +48,7 @@ export class BrowserMicCapture implements MicCapture {
     if (this.ctx) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     this.stream = stream;
-    const ctx = new AudioContext();
+    const ctx = new AudioContext({ sampleRate: STT_SAMPLE_RATE });
     this.ctx = ctx;
     this.sampleRate = ctx.sampleRate;
 
