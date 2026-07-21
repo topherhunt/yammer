@@ -39,16 +39,15 @@ From a clean checkout:
 1. **Database:** `createdb yammer_dev` (and `yammer_test`), then apply the schema: `psql -d yammer_dev -f apps/server/drizzle/0000_init.sql`.
 2. **Server env:** copy `apps/server/.env.example` to `apps/server/.env` and fill `DATABASE_URL`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`.
 3. **Vosk wake-word model:** `bash scripts/fetch-vosk-model.sh` (downloads ~40 MB to `apps/web/public/models/`, gitignored).
-4. **Google OAuth:** register `http://localhost:5173/auth/google/callback` as an authorized redirect URI.
+4. **Google OAuth:** register `http://localhost:3141/auth/google/callback` as an authorized redirect URI.
 
-Then run the two dev servers:
+Then run the single dev process (Hono serves the API + STT WebSocket, and the web client via Vite middleware -- one port, one command):
 
 ```sh
-pnpm --filter @yammer/server dev   # API + STT WS on :3141
-pnpm --filter @yammer/web dev      # web app on :5173 (proxies /api + /auth to :3141)
+pnpm dev   # everything on http://localhost:3141
 ```
 
-Open **http://localhost:5173**, sign in with Google, tap to start listening, and talk.
+Open **http://localhost:3141**, sign in with Google, tap to start listening, and talk. (Backend-less UI demo: `VITE_MOCK=1 pnpm --filter @yammer/web dev`. Production: `pnpm build` then `NODE_ENV=production pnpm --filter @yammer/server dev` serves the built bundle + API from the same one process.)
 
 > Real STT/LLM/Tavily calls cost money; the per-document spend meter (bottom of the chat sidebar) shows live cost. See `plan.md` §16 for the in-browser verification checklist.
 

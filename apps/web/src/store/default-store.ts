@@ -35,8 +35,12 @@ let singleton: StoreApi<AppStore> | null = null;
 export function getDefaultStore(): StoreApi<AppStore> {
   if (singleton) return singleton;
 
-  const apiBase = import.meta.env.VITE_API_BASE;
-  if (apiBase) {
+  // Default to the real backend, served same-origin by the single-process server
+  // (base ""). Set VITE_MOCK=1 for the backend-less mock demo; VITE_API_BASE can
+  // override the origin if the API is ever hosted elsewhere.
+  const mock = import.meta.env.VITE_MOCK === "1";
+  if (!mock) {
+    const apiBase = import.meta.env.VITE_API_BASE ?? "";
     // Real backend: the fetch client is authoritative-store-backed and carries the
     // session cookie. No seed data -- documents come from the server.
     const api: ApiClient = new FetchApiClient(apiBase);

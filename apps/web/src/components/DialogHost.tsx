@@ -117,7 +117,7 @@ function DialogFrame({
             type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="qa-dialog-close rounded p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+            className="qa-dialog-close btn-3d bg-gray-100 px-2 py-1 text-gray-600 dark:bg-gray-800 dark:text-gray-300"
           >
             ✕
           </button>
@@ -129,7 +129,7 @@ function DialogFrame({
 }
 
 const itemClass =
-  "w-full rounded px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800";
+  "btn-3d w-full bg-gray-50 px-3 py-2 text-left text-sm text-gray-700 dark:bg-gray-800 dark:text-gray-200";
 
 export function DialogHost() {
   const api = useStoreApi();
@@ -201,7 +201,7 @@ export function DialogHost() {
                   data-active={settings.theme === t.key}
                   aria-pressed={settings.theme === t.key}
                   className={cx(
-                    `qa-settings-theme-${t.key} rounded px-3 py-1.5 text-sm`,
+                    `qa-settings-theme-${t.key} btn-3d px-3 py-1.5 text-sm`,
                     settings.theme === t.key
                       ? "bg-blue-500 text-white"
                       : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300",
@@ -273,7 +273,7 @@ export function DialogHost() {
               type="button"
               onClick={() => dispatch({ type: "open_dialog", dialog: "load", sort: s.key })}
               className={cx(
-                "qa-load-sort rounded px-2 py-1 text-xs",
+                "qa-load-sort btn-3d px-2.5 py-1 text-xs",
                 loadSort === s.key
                   ? "bg-blue-500 text-white"
                   : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300",
@@ -329,7 +329,7 @@ export function DialogHost() {
               </span>
               <button
                 type="button"
-                className="qa-history-restore shrink-0 rounded bg-gray-100 px-2 py-1 text-xs text-gray-700 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-200"
+                className="qa-history-restore btn-3d shrink-0 bg-gray-100 px-2.5 py-1 text-xs text-gray-700 dark:bg-gray-800 dark:text-gray-200"
                 onClick={() => dispatch({ type: "restore_version", seq: v.seq })}
               >
                 Restore

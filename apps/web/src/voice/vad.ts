@@ -24,6 +24,11 @@ export class SileroVadDetector implements VadDetector {
   async start(): Promise<void> {
     if (!this.vad) {
       this.vad = await MicVAD.new({
+        // Load the VAD worklet + Silero model and the onnxruntime WASM from a
+        // version-pinned CDN so they resolve reliably under Vite (which cannot
+        // pre-bundle the ort WASM). Versions must match the installed packages.
+        baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
+        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/",
         onSpeechStart: () => {
           for (const cb of this.startCbs) cb();
         },

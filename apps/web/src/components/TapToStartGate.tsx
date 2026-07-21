@@ -36,11 +36,11 @@ export function TapToStartGate() {
         // Focus the sole control on mount so a keyboard/AT user can start at once.
         autoFocus
         aria-busy={startQueued}
-        className="qa-tap-gate-button flex flex-col items-center gap-4 rounded-2xl px-10 py-8 text-center"
+        className="qa-tap-gate-button btn-3d flex flex-col items-center gap-4 rounded-2xl bg-white px-10 py-8 text-center dark:bg-gray-800"
       >
         <span
           aria-hidden
-          className="grid h-24 w-24 place-items-center rounded-full bg-red-500 text-4xl text-white shadow-lg transition-transform hover:scale-105"
+          className="btn-3d grid h-24 w-24 place-items-center rounded-full bg-red-500 text-4xl text-white"
         >
           ●
         </span>

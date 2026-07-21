@@ -408,6 +408,12 @@ These paths are covered by unit tests through their interfaces (fakes/mocks), bu
 - **Real backend features:** research (Tavily), export `.md`/`.docx`, and the diagnostic-log download all work against the live server + Postgres.
 - **Voice-restore:** "restore version 3" / "go back to the first version" resolve and restore; "read the earlier version, then put that paragraph back" works as a two-step.
 
+### Follow-ups from the first browser test
+
+- **Single process serving web + API -- DONE.** `pnpm dev` runs one process on one port (:3141): Hono serves the API + `/api/stt` WebSocket, and the web client is served by the same process (Vite middleware + HMR in dev, static bundle in prod). Same origin, no proxy, no `VITE_API_BASE`; OAuth redirect is just `:3141`. Verified by curl (client HTML on `/`, 401 on `/api/me`, SPA route 200). The real backend is now the default; `VITE_MOCK=1` selects the backend-less demo.
+- **VAD assets from CDN -> self-host:** the Silero VAD worklet/model + onnxruntime WASM currently load from a pinned jsDelivr CDN (to sidestep Vite's dep-optimizer choking on the ort WASM). Copy them into `public/` for a fully self-hosted/offline build, matching the keyless-Vosk ethos.
+- **Verify the two-tap gate is gone** after the VAD fix (the queued early-tap should now resolve in-gesture) and that the Vosk model actually loads in the browser.
+
 **Voice phase -- STT bridge hardening: DONE.** Auth gate before opening upstream, max-duration / idle / byte-budget / oversized-frame / per-user-concurrency caps, and buffer-until-open are implemented and unit-tested against a fake upstream (`apps/server/src/stt/bridge.ts`, env knobs in `.env.example`). Remaining small follow-ups for the live STT tuning (in-browser, with a key):
 - `stop` currently `closeBoth("done")` immediately, which can drop a trailing final transcript. Flush/commit the last utterance before closing once real endpointing is wired.
 - The frozen `SttCloseReason` enum has no concurrency value, so an over-cap socket closes with `server_error`. Consider adding a dedicated reason (e.g. `too_many_sessions`) so the client can show a precise message.

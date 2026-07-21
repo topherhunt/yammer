@@ -25,7 +25,7 @@ export function AppShell() {
           <button
             type="button"
             aria-label="Open menu"
-            className="qa-menu-button rounded p-1.5 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+            className="qa-menu-button btn-3d bg-gray-100 px-2 py-1.5 text-gray-700 dark:bg-gray-800 dark:text-gray-200"
             onClick={() => api.getState().dispatch({ type: "open_dialog", dialog: "menu" })}
           >
             ☰
@@ -38,7 +38,7 @@ export function AppShell() {
             type="button"
             aria-pressed={showChat}
             className={cx(
-              "qa-panel-toggle-chat rounded px-2 py-1 text-xs",
+              "qa-panel-toggle-chat btn-3d px-2.5 py-1 text-xs",
               showChat ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300",
             )}
             onClick={() => api.getState().dispatch({ type: "set_panel", panel: "chat" })}
@@ -49,7 +49,7 @@ export function AppShell() {
             type="button"
             aria-pressed={!showChat}
             className={cx(
-              "qa-panel-toggle-document rounded px-2 py-1 text-xs",
+              "qa-panel-toggle-document btn-3d px-2.5 py-1 text-xs",
               !showChat ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300",
             )}
             onClick={() => api.getState().dispatch({ type: "set_panel", panel: "document" })}
@@ -62,7 +62,7 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
         <aside
           className={cx(
-            "qa-chat-sidebar w-full shrink-0 border-r border-gray-200 dark:border-gray-800 md:flex md:w-80",
+            "qa-chat-sidebar w-full shrink-0 border-r border-gray-200 dark:border-gray-800 md:flex md:w-[30%]",
             showChat ? "flex" : "hidden",
           )}
         >

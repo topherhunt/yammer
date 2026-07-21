@@ -3,17 +3,13 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      // Dev proxy to the API server (:3141). changeOrigin:false preserves the
-      // Host header so the server builds the Google OAuth redirect_uri from the
-      // browser origin (http://localhost:5173) -- that is the URI to register in
-      // Google Console. ws:true upgrades the /api/stt WebSocket.
-      "/api": { target: "http://localhost:3141", ws: true, changeOrigin: false },
-      "/auth": { target: "http://localhost:3141", changeOrigin: false },
-    },
-  },
+  // Let esbuild pre-bundle @ricky0123/vad-web AND onnxruntime-web together:
+  // excluding vad-web breaks its `MicVAD` named export, and excluding
+  // onnxruntime-web leaves vad-web's `require("onnxruntime-web/wasm")` as an
+  // unsupported dynamic require. The ort WASM binaries themselves load at runtime
+  // from a pinned CDN (onnxWASMBasePath in vad.ts), not from Vite's dep bundle.
+  // No dev server / proxy here: the app is served by the single-process server
+  // (apps/server) in dev (Vite middleware mode) and prod (static), same origin.
   test: {
     environment: "jsdom",
     globals: true,

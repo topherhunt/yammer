@@ -4,13 +4,14 @@ import { useAppStore, useStoreApi } from "../store/context";
 // Bottom-of-sidebar mic control + status, wired to the listening machine via the
 // store. It pulses when the machine reports VAD speech and shows the radial while
 // an utterance is finalizing / in the pre-send grace window (listeningPhase) or a
-// turn is in flight (sttPhase "sending"). The button toggles listening/muted so
-// the whole thing is mouse+keyboard operable; voice-driven pause/mute arrives via
-// set_listening actions, which flow to the same machine.
+// turn is in flight (sttPhase "sending"). The button toggles listening <-> PAUSED
+// (soft stop -- the wake word stays active, so "Yammer, wake up" resumes
+// hands-free); a full hard mute (releasing the mic) is a deliberate voice command
+// ("mute the microphone"). All routes flow through set_listening + the machine.
 
 const LABELS: Record<string, string> = {
   listening: "Listening",
-  paused: "Paused",
+  paused: 'Paused -- say "Yammer, wake up"',
   muted: "Muted",
 };
 
@@ -26,9 +27,10 @@ export function ListeningIndicator() {
   const pulsing = isListening && vad;
 
   const toggle = () => {
+    // Soft pause (not hard mute) so the wake word keeps the resume hands-free.
     api.getState().dispatch({
       type: "set_listening",
-      state: isListening ? "muted" : "listening",
+      state: isListening ? "paused" : "listening",
     });
   };
 
@@ -44,7 +46,7 @@ export function ListeningIndicator() {
         aria-pressed={isListening}
         aria-label="Toggle microphone"
         className={cx(
-          "qa-mic-button relative grid place-items-center h-9 w-9 rounded-full text-white transition-colors",
+          "qa-mic-button btn-3d relative grid place-items-center h-10 w-10 rounded-full text-white",
           isListening ? "bg-red-500" : "bg-gray-400 dark:bg-gray-600",
           pulsing && "qa-mic-pulsing",
         )}

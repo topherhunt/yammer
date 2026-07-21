@@ -7,6 +7,8 @@
     "node": ">=20"
   },
   "scripts": {
+    "dev": "pnpm --filter @yammer/server dev",
+    "build": "pnpm --filter @yammer/web build",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest"
