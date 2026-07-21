@@ -1,4 +1,4 @@
-# PLAN: Yadda -- a 100% voice-driven, AI-driven text editor
+# PLAN: Yammer -- a 100% voice-driven, AI-driven text editor
 
 > Working blueprint. Derived from `vision.md`. Decisions marked **(assumed)** are my working defaults pending your confirmation -- see "Open questions / decisions needed" near the end. Decisions marked **(to verify)** need a live research/spike pass before we hardcode them.
 
@@ -31,10 +31,13 @@ A web app where a person with severe motor impairment (ALS) can write, edit, AI-
 | Styling | Tailwind (utility-first) | Matches the "compose from utilities first" preference. Component classes only for genuine multi-state widgets (the listening indicator, chat bubbles). |
 | Backend | **Hono** (on Node via `@hono/node-server`) | Yes, Hono is the modern pick you were reaching for: tiny, fast, first-class TS, runtime-portable. Express would also be fine; Hono wins on DX and types. |
 | LLM providers | Provider abstraction over **OpenAI direct** (GPT-5.6 family) primary; Anthropic + OpenRouter adapters behind the same seam | Decision: dev = **GPT-5.6 Luna**, prod = **GPT-5.6 Terra** (see §11). Same family = dev/prod parity on tool-calling + structured output. Model is a config string; other providers are drop-in via the adapter. |
-| STT | **OpenAI Realtime streaming transcription (`gpt-realtime-whisper`)** over a backend WebSocket, behind an `SttProvider` interface | Reversal from an earlier Web-Speech-first lean: iOS Safari/Chrome (WebKit) make Web Speech unreliable, and you're targeting iOS. Realtime gives true streaming + a latency/accuracy knob + identical behavior on all four browser targets. Web Speech stays as an optional desktop-Chrome-only zero-cost fallback. See §7. |
-| Persistence | **PostgreSQL** + Drizzle ORM + migrations | Hosted, multi-user, multi-device sync. Per-user data isolation. Append-only version/event tables fit naturally. |
+| STT (transcription) | **`gpt-realtime-whisper`** ($0.017/min, streaming) over a backend WebSocket, behind an `SttProvider` interface | This is the transcription-only streaming model -- NOT the pricey speech-to-speech `gpt-realtime-2.1` ($32/$64 per 1M audio tokens). Cheaper non-streaming alternatives (`gpt-4o-transcribe` $0.006/min, `gpt-4o-mini-transcribe` $0.003/min) are drop-in behind the same interface if we ever trade latency for cost. iOS/WebKit make Web Speech unreliable, so cloud STT is the cross-device default. See §7. |
+| Wake word (restart-from-pause) | **Picovoice Porcupine** (WASM, on-device) | Local, near-zero CPU, no audio leaves the device, no per-use cost. Enables hands-free "resume listening" without a click. See §7. |
+| Web search (research) | DIY pipeline behind a `SearchProvider` interface; default **Tavily** (or Exa) | We control the search -> pick -> fetch -> **summarize-to-notebook** flow ourselves rather than using the model's hosted `web_search` tool, so raw pages never bloat context and it stays provider-neutral. See §8. |
+| Persistence | **PostgreSQL** + Drizzle ORM + migrations | Hosted, multi-user, multi-device sync. A new database on the existing VPS Postgres (see §15). Per-user isolation. Append-only version/event tables fit naturally. |
 | Auth | **Google OAuth** (Sign in with Google) via Auth.js/Lucia-style session | One `users` row per Google login; all documents/history scoped to `userId`. HTTP-only session cookies. |
-| Tests | **Vitest** (unit/integration) + **Playwright** (E2E) | Vitest for the pure core and server handlers; Playwright for real browser + voice-mocked flows. |
+| Hosting | Self-hosted **Racknerd VPS** behind **Caddy** reverse proxy (see §15) | Node app + WS endpoint, Caddy routes by host and terminates TLS + proxies WebSockets. No Fly/Render. |
+| Tests | **Vitest** (unit/integration) + **Playwright** (E2E) + a small **live-API tier** with cost accounting (§10) | Vitest for the pure core and server handlers; Playwright for browser + voice-mocked flows; a tagged subset hits real APIs and tracks $ per run. |
 
 ---
 
@@ -89,11 +92,10 @@ Multi-user, hosted, Postgres. Every row below except `User` is scoped to a `user
 
 ### Entities
 
-- **User**: `id`, `googleSub`, `email`, `name`, `createdAt`. One row per Google login.
+- **User**: `id`, `googleSub`, `email`, `name`, `createdAt`, and a **`settings` JSONB** column (an open bag so we can add fields without migrations). Known keys so far: `theme` (`'system' | 'light' | 'dark'`, default `'system'` = follow OS/browser), `loadDocSort` (`'name' | 'created' | 'updated'`, default `'updated'`; date sorts are always descending) which persists silently so the Load dialog reopens with the last-used sort even though it has no settings-dialog UI, `activeDocumentId`, `model` config, `sttProvider`, and voice-tuning params (silence threshold, optimistic-send delay).
 - **Document**: `id`, `userId`, `name`, `createdAt`, `updatedAt`, `currentVersionId`.
 - **Version** (append-only event): `id`, `userId`, `documentId`, `seq` (monotonic per doc), `parentVersionId`, `author` (`'user' | 'ai'`), `kind` (`'edit' | 'create' | 'restore' | 'rename'`), `summary` (human-readable, e.g. "Reworded paragraph 3"), `fullText` (the complete document text at this version), `diff` (computed unified/word diff vs parent, for display), `createdAt`, and optional `restoredFromVersionId`.
 - **Turn** (append-only diagnostic + chat log): `id`, `userId`, `documentId`, `createdAt`, `transcript` (raw STT text sent), `sttMeta` (provider, audio seconds, interim-vs-final), `llmModel`, `llmRawResponse` (full JSON the model returned), `actions` (validated Action[] applied), `chatMessage`, `usage` (`{ sttSeconds, sttCost, inTokens, outTokens, cachedTokens, llmCost }`). This single table powers the chat sidebar, the spend meter, and the downloadable diagnostic log -- so those features are byproducts of data we already persist, not extra plumbing.
-- **Settings** (per user): `activeDocumentId`, `loadDocSort`, `model` config, `sttProvider`, voice-tuning params (silence threshold, optimistic-send delay), UI prefs.
 
 ### Spend meter (per document)
 
@@ -105,11 +107,12 @@ The small gray total at the bottom of the chat sidebar is `SUM(usage)` over the 
 
 ### Why full-text snapshots per version (the "battle-tested edit tracking" call)
 
-Your vision worries about storing only deltas to save space while guaranteeing corruption-free replay. Those two goals are in tension: deltas save space but carry replay/merge/corruption risk; snapshots are bulletproof but bigger. For a **single-user personal app** the space cost is negligible -- a 50-page doc is ~120 KB, so even 500 revisions is ~60 MB, trivial on disk. So the right engineering call is:
+Your vision worries about storing only deltas to save space while guaranteeing corruption-free replay. Those two goals are in tension: deltas save space but carry replay/merge/corruption risk; snapshots are bulletproof but bigger. Per user the space cost is negligible -- a 50-page doc is ~120 KB, so even 500 revisions is ~60 MB, trivial on disk (and it's one low-volume user). So the right engineering call is:
 
 - **Store the full text at every version** (bulletproof: restore = read a row, no replay).
 - **Also store a computed diff** vs the parent purely for display in the history list and chat log.
 - Restores and partial restores (e.g. "restore the 3rd paragraph to a few edits ago") are implemented as: read the old version's text, compute the new full text, append a new `kind: 'restore'` version. History is never mutated -- exactly your git-like requirement.
+- **Undo** is just this restore mechanism pointed at the parent version: "undo that" restores the previous version's full text as a new appended version. Because we store the full snapshot at every step, undo is a trivial, corruption-proof row read -- no diff-inversion needed. (We keep the diff for display; we don't rely on it for correctness.)
 
 This gives us the git-like append-only semantics and the "no risk of corruption" guarantee, and it is far simpler and safer than a delta/CRDT replay engine. If disk ever matters we can add snapshot-compaction later (keep every Nth full snapshot + deltas between) without changing the public API. I recommend we **not** reach for Yjs/Automerge/ProseMirror-steps here: those shine for real-time multi-user collaboration, which we do not have.
 
@@ -162,7 +165,7 @@ interface LlmProvider {
   }): Promise<{ chatMessage?: string; actions: unknown[]; usage: Usage }>;
 }
 ```
-Default implementation targets OpenRouter's OpenAI-compatible endpoint with JSON-schema structured output. A second adapter can target Anthropic/OpenAI natively if we want. **Structured output (schema-constrained), not free-form tool calls**, because we want a deterministic, validatable envelope every turn.
+Default implementation targets the **OpenAI Responses API** (GPT-5.6 Luna/Terra) with JSON-schema structured output. Anthropic and OpenRouter adapters sit behind the same interface for portability. **Structured output (schema-constrained), not free-form tool calls**, because we want a deterministic, validatable envelope every turn.
 
 ### System prompt (assembled per turn)
 - Role + editing philosophy: **maximally preserve the speaker's exact voice and wording; only reword when explicitly asked.**
@@ -208,19 +211,46 @@ States: `idle -> listening (pulsing on VAD) -> finalizing (radial progress durin
 - **Pulse** at the bottom of the chat sidebar reacts to VAD (`onVad`), showing audio is being captured.
 - On silence, a **radial progress bar** runs during (a) STT finalization and (b) a short pre-send grace window during which resumed speech cancels the send ("optimistic STT"). Barge-in cancels cleanly.
 - Endpointing: the Realtime API's server-side turn detection (semantic/silence VAD) signals end-of-utterance, tuned by a configurable silence threshold. A client-side VAD (Silero WASM, e.g. `@ricky0123/vad-web`) additionally drives the pulse indicator immediately without waiting on the network, and gates when we open the audio stream (so we don't stream/charge for pure silence).
-- **Voice control of listening itself:** since push-to-talk is impossible (no hands), the mic is always-on by default, with spoken "stop listening" / "start listening" commands and an unmistakable on-screen listening state. (Privacy + accidental-capture handling -- see Open Questions.)
+### Enabling the mic (the first-interaction gate)
+Browsers require a user gesture before `getUserMedia`, so the app opens on a **full-screen "Tap to start listening" gate** (big centered button). One tap/click grants mic permission and starts continuous listening; from then on the mic never stops while the tab is foregrounded. On backgrounding (browsers may suspend audio), we pause and show the gate again on refocus. This gate is the single required physical interaction.
+
+### Three listening states (stop / pause / mute)
+1. **Listening (default):** continuous capture, streaming speech to STT, acting on it.
+2. **Paused (soft stop -- hands-free resume):** we stop streaming to cloud STT and stop acting (no cost, nothing leaves the device), but keep a local **Porcupine wake-word** spotter running. Saying the wake word (e.g. "Hey Yammer") resumes full listening -- no click needed. This is the default target state for "stop listening," because it preserves hands-free operation.
+3. **Muted (hard stop):** the mic track is fully released. Restarting requires a physical tap (browser gesture rule) -- used only when the user genuinely wants the mic off.
+
+The mic button reflects state: live/pulsing when listening, gray with an "idle" indicator when paused/muted. Clicking it toggles.
+
+### Stopping is AI-interpreted, not a memorized command
+Stopping never requires an exact phrase. Whatever the user says goes to the LLM, which infers intent -- "hold on, I'm talking to my wife," "give me a sec," "quit listening" all resolve to a `set_listening: 'paused'` action. There is no Siri-style incantation to remember. (Risk: a false-positive stop could strand the user; mitigated because the wake word instantly resumes, and we can require the stop-intent to be reasonably unambiguous.)
+
+### Restart-from-pause is the one fixed phrase (and that's inherent)
+Resuming from **paused** is the sole asymmetry: while paused we send nothing to the LLM, so we can't AI-interpret an arbitrary "okay, continue" -- something has to be listening locally for free. That something is the on-device Porcupine wake-word spotter, which matches a fixed phrase. So: **stop = any wording (LLM-interpreted); resume-from-pause = the wake word (local) or a click.** Answering your question directly: yes, a hands-free wake word is entirely doable in-browser (Porcupine WASM, the same local-spotter pattern Siri/Alexa use), so he will not be forced back to the cursor to resume -- unless he chose full **mute**, which by definition needs a tap. We'll let you pick the wake phrase.
 
 ---
 
 ## 8. Web research tool
 
-`research` action -> backend `/api/research`:
-1. Run web search for each query (server-side; browser CORS makes this a must, as you noted).
-2. Fetch full text of the top results.
-3. Summarize into a findings block.
-4. Return the summary, which is injected into chat context and shown as an AI chat message.
+### Two integration models (and why we build our own)
+- **Model-hosted `web_search` tool** (e.g. OpenAI's built-in tool in the Responses API): the model runs search + read + summarize internally. Pros: zero infra. Cons: ~$10/1k tool calls **plus** the retrieved content billed at model token rates (often a fixed ~8k-token block per call, so $0.03+/call), it's OpenAI-specific (breaks provider neutrality), and it gives us less control over your hard requirement that raw pages be **digested, not dumped** into context.
+- **DIY pipeline (chosen):** we orchestrate it, exactly matching your mental model, and we control the summarize-to-notebook step. Provider-neutral and cheaper for our volume.
 
-Multi-step and **only** invoked when the user explicitly asks -- never autonomously. Thinking-status messages ("Searching the web...", "Reading results...") stream to the chat sidebar. Search provider (Brave/Bing/Tavily/etc.) is behind a small interface. **(provider to pick)**
+### The DIY flow (`research` action -> backend `/api/research`, server-side; browser CORS forces this)
+1. LLM picks search phrase(s); backend runs the search API (returns titles/snippets/URLs). Thinking-status "Searching the web..." streams to chat.
+2. LLM reads the result list and **chooses which 1-3 pages to read fully**. Status "Reading results...".
+3. Backend fetches the full text of the chosen pages. With Tavily/Exa this content comes back from the search API itself (no separate fetch); with a raw-SERP provider we'd add an extractor (`@mozilla/readability` + `jsdom`, or Jina Reader `r.jina.ai`).
+4. A dedicated summarization LLM call **digests the pages into a compact findings note** -- and only that note is appended to chat context (a message the AI writes to itself, like research notes in a notebook). Raw page text is never persisted into the growing context. This is enforced in code, not left to prompt discipline.
+
+Multi-step and **only** invoked when the user explicitly asks -- never autonomously.
+
+### Provider options (behind a `SearchProvider` interface)
+There are many providers; the field splits into "AI-optimized (returns clean content)" vs "raw Google SERP (you extract yourself)":
+- **Tavily (recommended default)** -- built for LLM agents; one call returns search + cleaned page content. Free 1,000 searches/mo, then $30/mo for 4,000 (~$0.0075 each). Covers personal use for free.
+- **Exa** -- neural/semantic search for LLMs; very generous 20,000 free requests/mo, $7/1k after, content $1/1k pages.
+- **Serper** -- raw Google SERP, cheapest ($0.30-$1/1k, 2,000 free/mo), but returns only SERP data so we'd fetch/extract fulltext ourselves.
+- **Not recommended:** Brave (you don't want to fund them), and **DuckDuckGo has no official API** -- only scraping libraries that get rate-limited/bot-blocked, or paid third-party scrapers, so it's not a reliable production choice despite the privacy appeal.
+
+For a single user, Tavily's or Exa's free tier means research costs **$0/mo** until real volume. All swappable via the interface.
 
 ---
 
@@ -230,6 +260,7 @@ Multi-step and **only** invoked when the user explicitly asks -- never autonomou
 - **Components**: `AppShell`, `ChatSidebar` (message list + thinking status + `ListeningIndicator` + `SpendMeter` gray total at the bottom), `DocumentPanel` (CodeMirror), `Dialog` host for `menu | help | load | history`, and a "Download diagnostic log" affordance in the menu (also voice-triggerable).
 - **Store (Zustand)** holds `AppState`; UI is a pure function of it. Actions from the reducer drive both editor transactions and dialog state.
 - **Chat log** shows every edit and restore attributed to `user` or `ai`, plus AI chat messages and thinking statuses.
+- **Recency-fading edit highlights (the STT-correction affordance).** When the AI applies an edit, the changed text animates in with a yellow highlight that fades over ~15s, so the user can see what changed and how recently (more faded = older). This makes correction natural: seeing a wrong word still glowing, he just says "no, change that to dogs, I didn't mean bark," and the AI treats it as an ordinary follow-up `edit_text` on the freshest change. No special "correction mode" -- corrections are just the next edit, which the append-only history already handles. Fade timing is a setting.
 - Full mouse/keyboard operability for every control (accessibility + dev).
 
 ---
@@ -245,15 +276,19 @@ Designed so **as much as possible is unit-tested** (your explicit requirement), 
   - Context assembler: given an AppState, the emitted context payload is correct (visible range, open dialog, compacted history).
   - Schema validation: malformed LLM output rejected with clear errors.
   - LLM/STT providers tested against a **mock provider** with canned structured responses -- no real API calls, no spend.
-- **Integration (Vitest):** server handlers (`/api/turn`, `/api/research`, CRUD) with an in-memory SQLite and mock LLM.
-- **E2E (Playwright):** full flows with STT mocked (inject transcripts) and LLM mocked: "dictate a paragraph," "reword paragraph 3," "show edit history and restore version N," "load document by name," "scroll to top," "research X." Assert against rendered content and `qa-*` selectors (not user-visible copy).
-- A small **golden-transcript eval set** for the command-interpretation prompt (dictation vs command vs edit), run against the cheap dev model, to catch prompt regressions. (Costs real tokens -> gated, opt-in, small N.)
+- **Integration (Vitest):** server handlers (`/api/turn`, `/api/research`, CRUD) against a real ephemeral Postgres (Testcontainers or a disposable test DB) and mock LLM.
+- **E2E (Playwright), mocked:** full flows with STT mocked (inject transcripts) and LLM mocked: "dictate a paragraph," "reword paragraph 3," "show edit history and restore version N," "load document by name," "scroll to top," "research X." Assert against rendered content and `qa-*` selectors (not user-visible copy). This is the default suite -- fast, free, runs on every change/CI.
+- **Live-API tier (`test:live`, real spend, opt-in):** a small curated subset that exercises the real STT + real LLM against Luna, so we cover genuine model behavior (structured-output validity, edit accuracy, endpointing). Design so cost is controlled and *tracked every run*:
+  - A **cost-accounting harness** wraps every provider call, sums `usage` (STT seconds x rate + tokens x per-model rate), and after the run prints a per-test and total-USD breakdown; the totals are appended to a `test-costs.jsonl` ledger so spend over time is visible.
+  - A **hard per-run budget cap** (env-configurable, e.g. $0.25): the harness aborts the live suite if projected/accumulated cost exceeds it, so a runaway loop can't rack up a bill.
+  - Kept **small and stable** (a handful of representative flows), gated behind an explicit script + env flag so it never runs by accident in CI or on a normal `pnpm test`. Per your global spending rule, this is the only test path that touches the real-dollar budget, and it announces its cost.
+- A **golden-transcript eval set** for command-interpretation (dictation vs command vs edit vs stop-intent) overlaps with the live tier -- same accounting + cap apply.
 
 ---
 
 ## 11. Answers to your open questions
 
-**Name.** "Yadda" is memorable and playful, but it leans on "yadda yadda" = *meaningless* chatter, which is slightly at odds with an app that's meant to give someone their voice back -- a touch dismissive. If that irony feels fun to you and your friend, keep it. If you want the playful-chatty vibe without the "blah blah" undertone, my shortlist: **Blurt** (you blurt, it writes -- my favorite), **Gab**, **Natter**, **Yap**, **Yammer**. I'll keep the repo named `yadda` until you decide.
+**Name.** Decided: **Yammer**. (Heads-up noted separately: "Yammer" was Microsoft's now-retired enterprise social network / Viva Engage -- irrelevant for a personal app, but a trademark shadow if you ever want a matching public domain.) The repo directory is still `yadda`; renaming it is optional and cosmetic.
 
 **STT local vs API.** Because you're targeting iOS Safari/Chrome (both WebKit, where Web Speech is unreliable), the cross-device default is **OpenAI Realtime streaming transcription (`gpt-realtime-whisper`)** proxied through our backend WebSocket -- true streaming, a latency/accuracy knob, and identical behavior on all four browser targets. Web Speech stays as an optional desktop-Chrome-only zero-cost fallback. Local in-browser Parakeet is not a quick win; browser-local Whisper is feasible but heavier -- both stay behind the `SttProvider` interface for later. Streaming preference is fully satisfied.
 
@@ -275,16 +310,15 @@ Rationale:
 
 ## 12. My open questions / decisions needed before it's safe to build
 
-**Resolved:** hosted multi-user web app + Google auth + Postgres, multi-device sync (§4). Keys: OpenAI/Anthropic/OpenRouter available. Devices: desktop Chrome/Safari + iOS Chrome/Safari (mobile is first-class). Models: Luna dev / Terra prod (§11). STT: OpenAI Realtime streaming (§7).
+**Resolved:** hosted multi-user web app + Google auth + Postgres, multi-device sync (§4). Keys: OpenAI/Anthropic/OpenRouter available. Devices: desktop Chrome/Safari + iOS Chrome/Safari (mobile first-class). Models: Luna dev / Terra prod, no auto-failover for now -- stay single-family for parity, revisit Sonnet/Claude 5 Haiku later (§11). STT: `gpt-realtime-whisper` streaming (§7). Mic UX: tap-to-start gate + listen/pause/mute with local wake-word resume, AI-interpreted stop (§7). Correction: fading edit highlights, corrections-as-next-edit (§9). Destructive actions: append-only history + spoken undo, no confirmation (§4). Research: DIY pipeline, default Tavily, summarize-to-notebook (§8). Hosting: Racknerd VPS + Caddy + a new DB on the existing Postgres (§15). Live-API test tier with cost cap (§10).
 
-Still open, ordered by how much they change what we build:
+Still genuinely open, ordered by how much they change what we build:
 
-1. **Always-on mic UX + privacy.** Push-to-talk is impossible, so the mic is always listening. How do we handle: accidental capture of side conversation, a clear "I'm listening now / I'm muted" signal, and a reliable spoken mute/unmute? Do we need any wake-word gating, or is "everything is a command, model decides" acceptable for v1? (This is the highest-risk UX decision.)
-2. **STT-error correction loop.** STT will mishear, and your friend can't just retype. The by-voice correction flow ("no, I said X", "fix the last word") is central to this being usable and deserves explicit design in v1, not v2. Agree?
-3. **Confirmation for destructive/irreversible actions.** Delete document, large rewrite -- do we require a spoken confirmation, or is append-only history enough of a safety net (nothing is ever truly lost)? I lean on the latter plus a spoken "undo".
-4. **Research provider.** Which web-search API do you want behind `/api/research` (Brave, Tavily, Bing, etc.)? Any existing key?
-5. **Hosting target.** Where does this deploy (Fly/Render/Railway/Vercel + managed Postgres like Neon/Supabase)? Affects the WebSocket-STT proxy setup and env/secrets. Any preference?
-6. **Model-family switch fallback.** GPT-5.6 requires OpenAI availability; do you want Sonnet 5 pre-wired as an automatic failover in prod, or is a manual config flip fine?
+1. **Wake phrase.** What word/phrase should resume-from-pause? (Porcupine works best with a distinct 2-3 syllable phrase; "Yammer" alone may false-trigger during dictation -- something like "Hey Yammer" or "Okay Yammer" is safer.) Also: Porcupine's free tier is fine for personal use, but confirm you're OK adding Picovoice as a dependency (there are open-alternatives if not).
+2. **Stop-intent false positives.** How aggressive should the "stop listening" inference be? Too eager and normal dictation containing "stop" pauses him mid-sentence; too cautious and he can't stop when a visitor arrives. I lean cautious + instant wake-word recovery. Any preference on erring one way?
+3. **Research provider key.** Tavily (default) vs Exa -- do you have/prefer either? Both free at your volume; I'll wire Tavily unless you say otherwise.
+4. **STT streaming vs cheaper batch.** Default to `gpt-realtime-whisper` streaming ($0.017/min) for snappy UX, or start with `gpt-4o-transcribe` batch ($0.006/min, ~3x cheaper) and accept slightly higher latency? I lean streaming; with VAD-gating we only pay for real speech.
+5. **Mic while backgrounded / multi-tab.** Acceptable that listening pauses when the tab isn't foregrounded (and multi-device means only the active tab listens)? I assume yes.
 
 ---
 
@@ -294,10 +328,10 @@ Each phase ends green (tests pass) and demoable.
 
 - **Phase 0 -- Scaffold.** pnpm monorepo, TS config, Vite React app, Hono server, Vitest + Playwright, Tailwind, Postgres+Drizzle+migrations, Google OAuth + session, CI script. Empty two-panel shell renders behind login.
 - **Phase 1 -- Core domain (pure, no UI).** AppState types, Action types + Zod schema, edit engine, version/history model, action reducer, context assembler. Heavy unit tests. **This is where most of the value and most of the tests live.**
-- **Phase 2 -- LLM turn loop.** `LlmProvider` + OpenRouter adapter + mock provider, system prompt, `/api/turn`, structured-output validation. Drive the reducer from a mocked model end to end in tests.
-- **Phase 3 -- Frontend wiring.** CodeMirror document panel, chat sidebar, dialogs (menu/help/load/history), Zustand store, apply actions to real UI. Full mouse/keyboard operability. Playwright flows with mocked STT+LLM.
-- **Phase 4 -- Voice.** `SttProvider` + Web Speech impl, listening state machine, pulse + radial indicators, optimistic-send grace window, spoken mute/unmute. The first real "talk to it" build.
-- **Phase 5 -- Research.** `/api/research` search+fetch+summarize, thinking-status streaming, `research` action.
+- **Phase 2 -- LLM turn loop.** `LlmProvider` + OpenAI/GPT-5.6 adapter (Luna) + mock provider, system prompt, `/api/turn`, structured-output validation, `Turn` persistence + usage capture. Drive the reducer from a mocked model end to end in tests.
+- **Phase 3 -- Frontend wiring.** CodeMirror document panel, chat sidebar, dialogs (menu/help/load/history), Zustand store, theme (system/light/dark), apply actions to real UI. Full mouse/keyboard operability. Playwright flows with mocked STT+LLM.
+- **Phase 4 -- Voice.** `SttProvider` + `gpt-realtime-whisper` WS proxy, tap-to-start gate, listen/pause/mute state machine, Porcupine wake-word resume, pulse + radial indicators, optimistic-send grace window, AI-interpreted stop. The first real "talk to it" build.
+- **Phase 5 -- Research.** `/api/research` search (Tavily) + read + summarize-to-notebook, thinking-status streaming, `research` action.
 - **Phase 6 -- Polish + hardening.** STT-correction UX, spend meter, downloadable diagnostic log, accessibility pass, prompt-eval golden set, real-model tuning (incl. large-doc edit-accuracy eval for Luna), error surfacing, settings screen.
 
 ---
@@ -309,4 +343,16 @@ Each phase ends green (tests pass) and demoable.
 - **Latency.** Optimistic STT + fast dev model + streaming thinking-status keep it feeling responsive; measure end-to-end and revisit the single-audio-model question only if latency dominates.
 - **Always-on mic privacy.** Clear listening indicator, spoken mute, and (if needed) local STT so audio never leaves the device.
 - **Model drift / prompt regressions.** The eval set + structured-output validation catch breakage when we swap models.
-```
+- **Runaway API spend in tests/loops.** The live-test cost harness + hard budget cap (§10) and the per-document spend meter (§4) keep real-dollar cost visible and bounded.
+- **Wake-word false triggers / stop-intent misfires.** Distinct multi-syllable wake phrase, cautious stop inference, and instant wake-word recovery so any misfire is cheap to undo.
+
+---
+
+## 15. Hosting & deployment
+
+Deployed to an existing **Racknerd VPS** (ultra-budget), alongside other apps, fronted by **Caddy** as the reverse proxy (host-based routing on a shared IP, automatic TLS). This app is just another Node process: the Hono server serves the built React assets and the API, including the WebSocket STT proxy -- Caddy proxies WebSockets transparently, so no special infra. **No Fly/Render/Vercel.**
+
+- **Database:** reuse the VPS's existing Postgres server; create a **new database** for this app with its own tables/migrations. No managed DB service.
+- **Secrets:** API keys (OpenAI, Tavily, Google OAuth client) live in server-side env on the VPS, never in the browser bundle.
+- **Deploy:** a lightweight script (you'll share your existing pattern from the other apps when we get there). Deployment is explicitly **later** -- not part of the initial build. Design keeps it a plain `node`-runnable server so it drops onto the box with minimal ceremony.
+- **Process/ports:** app listens on a local port; Caddy maps the public hostname to it. (Details TBD against your existing Caddyfile.)
