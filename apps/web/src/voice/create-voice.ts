@@ -87,10 +87,17 @@ export function createVoice(
   });
 
   if (typeof document !== "undefined") {
+    // Two distinct "went away" signals, both routed to the same idempotent machine
+    // events: visibilitychange fires when the TAB is switched away; window blur/focus
+    // fires when the whole WINDOW loses focus behind another app while the tab stays
+    // active (which visibilitychange misses). Together they auto-pause capture
+    // whenever Yammer is not the foreground surface, and resume when it is again.
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) controller.pageHidden();
       else controller.pageVisible();
     });
+    window.addEventListener("blur", () => controller.pageHidden());
+    window.addEventListener("focus", () => controller.pageVisible());
   }
 
   return { controller, sfx };

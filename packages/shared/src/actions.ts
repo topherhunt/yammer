@@ -199,9 +199,18 @@ export const actionSchema = z.discriminatedUnion("type", [
 export type Action = z.infer<typeof actionSchema>;
 export type ActionType = Action["type"];
 
-/** The full envelope the LLM must return every turn. */
+/** The full envelope the LLM must return every turn.
+ *
+ * chatMessage is nullish, not just optional: the model is told to use it sparingly
+ * (no message for routine scroll/menu/edit turns), and it expresses "no message"
+ * as an explicit JSON `null` -- which a bare `.optional()` would REJECT, sinking an
+ * otherwise-valid turn ("close the dialog" issues a valid action + null message).
+ * Normalize null -> undefined so downstream only ever sees `string | undefined`. */
 export const llmResponseSchema = z.object({
-  chatMessage: z.string().optional(),
+  chatMessage: z
+    .string()
+    .nullish()
+    .transform((v) => v ?? undefined),
   actions: z.array(actionSchema),
 });
 export type LlmResponse = z.infer<typeof llmResponseSchema>;

@@ -36,6 +36,15 @@ import { copyToClipboard, downloadFile, playSfx } from "./browser-effects";
 
 export type SttPhase = "idle" | "finalizing" | "sending";
 
+/** A turn (request + valid response) gets this many attempts before we give up and
+ * surface an error -- covers a transient upstream 502 and the occasional unusable
+ * model response, both of which usually succeed on a retry. */
+const MAX_TURN_ATTEMPTS = 3;
+/** Linear backoff base between turn retries (multiplied by the attempt number). */
+const TURN_RETRY_DELAY_MS = 400;
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 /** One-shot scroll command forwarded to a panel; the nonce makes repeats fire. */
 export interface ScrollCommand {
   target: "document" | "chat";
@@ -582,36 +591,60 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       try {
         const context = assembleContext(get().app);
         const documentId = get().app.activeDocument?.id;
-        let result;
-        try {
-          result = await deps.api.turn({
-            transcript: text,
-            context,
-            ...(documentId !== undefined ? { documentId } : {}),
-            ...(sttSeconds !== undefined ? { sttSeconds } : {}),
-          });
-        } catch (err) {
-          surfaceError(`Turn request failed: ${errMessage(err)}`);
-          return;
-        }
 
-        const parsed = parseLlmResponse({
-          chatMessage: result.chatMessage,
-          actions: result.actions,
-        });
-        if (!parsed.ok) {
+        // A turn can fail two ways -- the request itself (network / 502 upstream) or
+        // an invalid model response -- and BOTH warrant a couple of retries: a
+        // UI-driving AI that emits an unusable turn is UI-breaking, so we retry
+        // before surfacing, and on final failure we log the FULL raw response so the
+        // bug is diagnosable rather than a bare "expected string, received null".
+        for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt++) {
+          const last = attempt >= MAX_TURN_ATTEMPTS;
+          let result;
+          try {
+            result = await deps.api.turn({
+              transcript: text,
+              context,
+              ...(documentId !== undefined ? { documentId } : {}),
+              ...(sttSeconds !== undefined ? { sttSeconds } : {}),
+            });
+          } catch (err) {
+            if (!last) {
+              await delay(TURN_RETRY_DELAY_MS * attempt);
+              continue;
+            }
+            surfaceError(`Turn request failed after ${attempt} attempts: ${errMessage(err)}`);
+            return;
+          }
+
+          const parsed = parseLlmResponse({
+            chatMessage: result.chatMessage,
+            actions: result.actions,
+          });
+          if (parsed.ok) {
+            applyResponse(parsed.response, result.usage);
+            return;
+          }
+
+          // Invalid response: it was still billed, so record usage; log the raw
+          // envelope (console -- the model's actual output) for troubleshooting.
+          set((s) => ({ usages: [...s.usages, result.usage], lastError: parsed.error }));
+          // eslint-disable-next-line no-console
+          console.error(
+            `[turn] invalid LLM response (attempt ${attempt}/${MAX_TURN_ATTEMPTS}): ${parsed.error}`,
+            { transcript: text, chatMessage: result.chatMessage, actions: result.actions, raw: result.raw },
+          );
+          if (!last) {
+            await delay(TURN_RETRY_DELAY_MS * attempt);
+            continue;
+          }
           pushEntry({
             kind: "error",
             id: newId(),
             at: now(),
-            message: `Invalid LLM response: ${parsed.error}`,
+            message: `Invalid LLM response after ${attempt} attempts: ${parsed.error}. Full response logged to the browser console.`,
           });
-          // Record usage: the call was still billed even though we can't apply it.
-          set((s) => ({ usages: [...s.usages, result.usage], lastError: parsed.error }));
           return;
         }
-
-        applyResponse(parsed.response, result.usage);
       } catch (err) {
         surfaceError(`Turn failed: ${errMessage(err)}`);
       } finally {

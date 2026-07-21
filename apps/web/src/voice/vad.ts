@@ -29,6 +29,11 @@ export class SileroVadDetector implements VadDetector {
         // pre-bundle the ort WASM). Versions must match the installed packages.
         baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
         onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/",
+        // Fire end-of-speech after a shorter silence hangover than the default
+        // (~800ms) so the turn kicks off sooner -- a real chunk of the "finished
+        // speaking -> response" latency. The optimistic-send grace window recovers
+        // the occasional too-eager stop, so this is safe to tighten.
+        redemptionMs: 500,
         onSpeechStart: () => {
           for (const cb of this.startCbs) cb();
         },

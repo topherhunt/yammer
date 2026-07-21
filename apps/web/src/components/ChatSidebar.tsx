@@ -17,13 +17,13 @@ function ChatMessageView({ entry }: { entry: ChatEntry }) {
   switch (entry.kind) {
     case "user_message":
       return (
-        <div className="qa-chat-entry qa-chat-user max-w-[85%] rounded-lg bg-blue-500 px-3 py-2 text-sm text-white">
+        <div className="qa-chat-entry qa-chat-user rounded-lg bg-blue-500 px-3 py-2 text-sm text-white">
           {entry.text}
         </div>
       );
     case "ai_message":
       return (
-        <div className="qa-chat-entry qa-chat-ai max-w-[85%] rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
+        <div className="qa-chat-entry qa-chat-ai rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
           {entry.text}
         </div>
       );
@@ -80,10 +80,19 @@ function ChatMessageView({ entry }: { entry: ChatEntry }) {
   }
 }
 
-/** The user's own dictated messages hug the right edge; everything else is
- * left/full-width. Alignment sits on the animating <li> flex item, not the bubble. */
-function entryAlignEnd(entry: ChatEntry): boolean {
-  return entry.kind === "user_message";
+/** Alignment + width cap for one entry's wrapper (the animating <li> flex item, NOT
+ * the bubble -- putting the % width on a shrink-wrapped grid item made it erratic).
+ * The user's dictated messages hug the right at up to 85% width; AI replies hug the
+ * left at up to 85%; status/edit/error lines span the full width. */
+function entryWrapperClass(entry: ChatEntry): string {
+  switch (entry.kind) {
+    case "user_message":
+      return "self-end max-w-[85%]";
+    case "ai_message":
+      return "self-start max-w-[85%]";
+    default:
+      return "self-stretch";
+  }
 }
 
 export function ChatSidebar() {
@@ -118,10 +127,7 @@ export function ChatSidebar() {
               // Each new entry grows from height 0 to its natural height over 300ms
               // (grid-rows 0fr->1fr; see .qa-chat-anim). Alignment lives here on the
               // flex item; the bubble styling lives on the inner content.
-              className={cx(
-                "qa-chat-anim",
-                entryAlignEnd(entry) ? "self-end" : "self-stretch",
-              )}
+              className={cx("qa-chat-anim", entryWrapperClass(entry))}
             >
               <div className="qa-chat-anim-inner">
                 <ChatMessageView entry={entry} />

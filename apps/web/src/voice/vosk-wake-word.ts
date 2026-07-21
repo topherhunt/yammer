@@ -17,11 +17,14 @@ import type { WakeWordDetector } from "./interfaces";
 
 const DEFAULT_MODEL_URL = "/models/vosk-model-small-en-us.tar.gz";
 
-// Grammar restricts the recognizer's vocabulary to the wake phrase plus the
+// Grammar restricts the recognizer's vocabulary to the wake phrases plus the
 // out-of-vocabulary token, which sharply improves accuracy and speed for a
-// single-phrase spotter.
-const WAKE_PHRASE = "yammer wake up";
-const GRAMMAR = JSON.stringify([WAKE_PHRASE, "[unk]"]);
+// single-phrase spotter. We include the bare "wake up" as its own alternative:
+// "Yammer" is an uncommon word the small model often mis-hears (hammer/jammer), so
+// keying the actual match on the reliably-recognized "wake up" makes the wake far
+// more dependable while the full "Yammer, wake up" still works.
+const WAKE_TRIGGER = "wake up";
+const GRAMMAR = JSON.stringify(["yammer wake up", WAKE_TRIGGER, "[unk]"]);
 
 // Mean per-word confidence required to accept a wake. The grammar makes even a
 // weak "yam" transcribe as the full phrase, but the words you did not actually say
@@ -51,10 +54,11 @@ function meanConfidence(result: VoskResult): number {
   return total / words.length;
 }
 
-/** Accept only when the recognized text IS the wake phrase and the mean word
- * confidence clears the bar. */
+/** Accept when the recognized text contains the "wake up" trigger and the mean word
+ * confidence clears the bar. (The "Yammer" prefix is welcome but not required, since
+ * the small model recognizes it unreliably.) */
 function isConfidentWake(result: VoskResult, minConfidence: number): boolean {
-  if (!result.text.toLowerCase().includes(WAKE_PHRASE)) return false;
+  if (!result.text.toLowerCase().includes(WAKE_TRIGGER)) return false;
   return (result.result?.length ?? 0) > 0 && meanConfidence(result) >= minConfidence;
 }
 

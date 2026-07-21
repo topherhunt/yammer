@@ -14,6 +14,11 @@ export interface LlmProviderConfig {
   model: string;
   /** Override the API base URL (OpenRouter, a proxy, tests). */
   baseUrl?: string;
+  /** Reasoning effort for the GPT-5 family. Lower = far lower latency (the model
+   * "thinks" less before answering) at some cost to hard-reasoning accuracy. A UI
+   * turn (map speech -> actions) is not a hard reasoning task, so we default LOW,
+   * not the model's heavier default. Raise to "medium" if action accuracy slips. */
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 // The structured-output contract sent to the Responses API. It pins the
@@ -137,6 +142,12 @@ export function parseOpenAiResponse(response: OpenAiResponseLike): LlmResult {
  */
 export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
   const client = new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl });
+  // Latency knobs, config-first then env, with UI-tuned defaults. Turns run in the
+  // interactive voice loop, so we bias hard toward responsiveness.
+  const reasoningEffort =
+    config.reasoningEffort ??
+    (process.env.LLM_REASONING_EFFORT as LlmProviderConfig["reasoningEffort"]) ??
+    "low";
 
   return {
     async complete(req: LlmRequest): Promise<LlmResult> {
@@ -145,6 +156,9 @@ export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
         model: req.model || config.model,
         instructions: req.system,
         input: req.messages.map((m) => ({ role: m.role, content: m.content })),
+        // Cut latency: keep the model's "thinking" short for these routine
+        // speech -> action turns rather than the heavier default effort.
+        reasoning: { effort: reasoningEffort },
         // Cap output tokens when the caller sets a ceiling (the eval budget
         // harness does), so the most expensive dimension can't run to the model
         // default. Omitted entirely when unset -- the model's default applies.

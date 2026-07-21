@@ -105,26 +105,33 @@ describe("submitTranscript turn loop", () => {
     expect(kinds).toContain("edit");
   });
 
-  it("surfaces a chat error when the LLM returns an invalid action", async () => {
+  it("retries an invalid LLM response a few times, then surfaces a chat error", async () => {
+    let calls = 0;
     const { store } = makeStore({
       api: {
-        turnResponder: () => ({
-          actions: [{ type: "not_a_real_action" }],
-          usage: { sttSeconds: 1, inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 },
-          raw: {},
-        }),
+        turnResponder: () => {
+          calls += 1;
+          return {
+            actions: [{ type: "not_a_real_action" }],
+            usage: { sttSeconds: 1, inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 },
+            raw: {},
+          };
+        },
       },
     });
 
     await store.getState().submitTranscript("do something weird");
 
     const state = store.getState();
+    // An unusable turn (a UI-driving AI emitting a bad action) is retried before we
+    // give up -- three total attempts here, since the mock is always invalid.
+    expect(calls).toBe(3);
     const last = state.app.chat.at(-1);
     expect(last?.kind).toBe("error");
     // The document is untouched by an invalid turn.
     expect(state.app.activeDocument?.text).toBe("the cat sat");
-    // Usage is still recorded so the spend meter reflects the (billed) call.
-    expect(state.usages).toHaveLength(1);
+    // Each attempt was billed, so usage is recorded once per attempt.
+    expect(state.usages).toHaveLength(3);
   });
 });
 

@@ -50,10 +50,14 @@ export async function handleTurn(
   const sttSeconds = parsedBody.data.sttSeconds ?? 0;
   const sttMeta = parsedBody.data.sttMeta ?? null;
   const model = process.env.LLM_MODEL ?? "gpt-5.6-luna";
+  // Set YAMMER_TURN_DEBUG=1 to log each turn's transcript, LLM latency, and the raw
+  // model response -- the ground truth for diagnosing an "invalid LLM response".
+  const debug = !!process.env.YAMMER_TURN_DEBUG;
 
   // Relay the turn to the model. A provider failure is surfaced (never swallowed)
   // as a 502 -- the client cannot apply a turn it never received.
   let llmResult;
+  const startedAt = Date.now();
   try {
     llmResult = await deps.llm.complete({
       system: buildSystemPrompt(),
@@ -61,10 +65,24 @@ export async function handleTurn(
       model,
     });
   } catch (err) {
+    if (debug) {
+      console.error(
+        `[turn] LLM error after ${Date.now() - startedAt}ms for "${transcript}":`,
+        err,
+      );
+    }
     return c.json(
       { error: `LLM request failed: ${err instanceof Error ? err.message : String(err)}` },
       502,
     );
+  }
+  if (debug) {
+    console.log(
+      `[turn] "${transcript}" -> LLM ${Date.now() - startedAt}ms, ` +
+        `${llmResult.actions?.length ?? 0} action(s), ` +
+        `chatMessage=${JSON.stringify(llmResult.chatMessage ?? null)}`,
+    );
+    console.log("[turn] raw:", JSON.stringify(llmResult.raw));
   }
 
   const usage = combineUsage(sttSeconds, llmResult.usage);
