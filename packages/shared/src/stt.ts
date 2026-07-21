@@ -18,7 +18,18 @@ export interface SttStartMessage {
 export interface SttStopMessage {
   type: "stop";
 }
-export type SttClientMessage = SttStartMessage | SttStopMessage;
+/** Client -> server: the client VAD detected end-of-speech. Force the upstream to
+ * transcribe the audio buffered so far and emit a final. Because the client gates
+ * audio on its own VAD (silence is never streamed), the upstream never hears the
+ * trailing silence it would otherwise use to auto-endpoint -- so the client must
+ * signal the utterance boundary explicitly, or no final is ever produced. */
+export interface SttCommitMessage {
+  type: "commit";
+}
+export type SttClientMessage =
+  | SttStartMessage
+  | SttStopMessage
+  | SttCommitMessage;
 
 export const sttLatencySchema = z.enum([
   "minimal",
@@ -41,9 +52,11 @@ export const sttStartMessageSchema = z.object({
   latency: sttLatencySchema.optional(),
 });
 export const sttStopMessageSchema = z.object({ type: z.literal("stop") });
+export const sttCommitMessageSchema = z.object({ type: z.literal("commit") });
 export const sttClientMessageSchema = z.discriminatedUnion("type", [
   sttStartMessageSchema,
   sttStopMessageSchema,
+  sttCommitMessageSchema,
 ]);
 
 // Compile-time guard that schema and interfaces stay consistent in both directions.

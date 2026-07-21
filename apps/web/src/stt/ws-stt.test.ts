@@ -103,6 +103,27 @@ describe("audio gating", () => {
     expect(h.socket.sentBinary).toHaveLength(1);
   });
 
+  it("commits the utterance on end-of-speech, but only once enough audio streamed", () => {
+    const h = makeClient(); // FakeMicCapture sampleRate 16000 -> 1920-sample floor
+    h.client.start();
+    h.socket.open();
+    h.socket.server({ type: "ready" });
+
+    // A fleeting blip streamed almost nothing: end-of-speech must NOT commit
+    // (OpenAI rejects a sub-100ms commit).
+    h.vad.emitSpeechStart();
+    h.mic.emitFrame(frame(1)); // 3 samples
+    h.vad.emitSpeechEnd();
+    expect(h.socket.sentControl).not.toContainEqual({ type: "commit" });
+
+    // A real utterance (>=120ms @ 16kHz => >=1920 samples) commits on speech-end
+    // so the upstream transcribes it and returns a final.
+    h.vad.emitSpeechStart();
+    h.mic.emitFrame(new Int16Array(2000));
+    h.vad.emitSpeechEnd();
+    expect(h.socket.sentControl.at(-1)).toEqual({ type: "commit" });
+  });
+
   it("surfaces VAD speech edges through onVad", () => {
     const h = makeClient();
     const seen: boolean[] = [];

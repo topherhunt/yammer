@@ -54,6 +54,9 @@ export class WsSttClient implements SttProvider {
   private socket: WebSocketLike | null = null;
   private ready = false;
   private speaking = false;
+  /** Samples streamed upstream since the last commit. OpenAI rejects a commit of
+   * under ~100 ms of audio, so end-of-speech only commits once enough was sent. */
+  private sentSamplesSinceCommit = 0;
   /** Frames captured before `ready`; flushed once the upstream is OPEN so the
    * leading edge of an utterance is not lost (and early frames don't tear the
    * connection down -- see plan.md voice security backlog). */
@@ -88,6 +91,10 @@ export class WsSttClient implements SttProvider {
     opts.vad.onSpeechEnd(() => {
       this.speaking = false;
       this.emitVad(false);
+      // End-of-speech: tell the server to commit the buffered utterance so the
+      // upstream transcribes it and emits a final. Without this the upstream (with
+      // server-VAD disabled) never endpoints and no final is ever produced.
+      this.commitUtterance();
     });
   }
 
@@ -100,6 +107,7 @@ export class WsSttClient implements SttProvider {
     this.stopping = false;
     this.ready = false;
     this.speaking = false;
+    this.sentSamplesSinceCommit = 0;
     this.prebuffer = [];
     this.reconnectAttempts = 0;
     this.reconnectScheduled = false;
@@ -232,6 +240,21 @@ export class WsSttClient implements SttProvider {
         frame.byteOffset + frame.byteLength,
       ),
     );
+    this.sentSamplesSinceCommit += frame.length;
+  }
+
+  /** On end-of-speech, commit the buffered utterance so the upstream transcribes
+   * it. Guarded: a commit of under ~120 ms of audio is rejected by OpenAI
+   * ("buffer too small"), so a fleeting VAD blip that streamed almost nothing is
+   * dropped rather than committed. */
+  private commitUtterance(): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WS_OPEN || !this.ready) return;
+    const minSamples = this.opts.mic.sampleRate * 0.12;
+    if (this.sentSamplesSinceCommit < minSamples) return;
+    this.sentSamplesSinceCommit = 0;
+    const commit: SttClientMessage = { type: "commit" };
+    socket.send(JSON.stringify(commit));
   }
 
   private onServerMessage(data: unknown): void {

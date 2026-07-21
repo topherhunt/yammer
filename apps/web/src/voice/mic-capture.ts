@@ -37,12 +37,23 @@ function floatToPcm16(frame: Float32Array): Int16Array {
 // than streaming the hardware rate (typically 48 kHz) and being rejected.
 const STT_SAMPLE_RATE = 24000;
 
+// Speech RMS tops out well below 1.0; this maps a "full" speaking level to 1.0 so
+// the indicator swings across a useful range rather than barely twitching.
+const LEVEL_FULL_SCALE = 0.15;
+// Emit a level every Nth worklet frame. The worklet posts a 128-sample quantum,
+// so at 24 kHz that is ~187 frames/s; every 6th is ~31 updates/s -- smooth without
+// thrashing the store/UI.
+const LEVEL_EMIT_EVERY = 6;
+
 export class BrowserMicCapture implements MicCapture {
   sampleRate = STT_SAMPLE_RATE;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private node: AudioWorkletNode | null = null;
   private frameCbs: Array<(frame: Int16Array) => void> = [];
+  private levelCbs: Array<(level: number) => void> = [];
+  private smoothedLevel = 0;
+  private frameCount = 0;
 
   async start(): Promise<void> {
     if (this.ctx) return;
@@ -66,6 +77,7 @@ export class BrowserMicCapture implements MicCapture {
     node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
       const pcm = floatToPcm16(ev.data);
       for (const cb of this.frameCbs) cb(pcm);
+      if (this.levelCbs.length) this.emitLevel(ev.data);
     };
     source.connect(node);
     this.node = node;
@@ -79,9 +91,34 @@ export class BrowserMicCapture implements MicCapture {
     this.stream = null;
     void this.ctx?.close();
     this.ctx = null;
+    this.smoothedLevel = 0;
+    this.frameCount = 0;
   }
 
   onFrame(cb: (frame: Int16Array) => void): void {
     this.frameCbs.push(cb);
+  }
+
+  onLevel(cb: (level: number) => void): void {
+    this.levelCbs.push(cb);
+  }
+
+  /** Compute the RMS of this frame, smooth it (fast attack so a loud syllable
+   * pops immediately, slow release so it eases back rather than flickering), and
+   * emit a normalized 0..1 level every Nth frame. */
+  private emitLevel(frame: Float32Array): void {
+    let sumSquares = 0;
+    for (let i = 0; i < frame.length; i++) {
+      const sample = frame[i] ?? 0;
+      sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares / Math.max(1, frame.length));
+    // Attack instantly toward a louder level; release ~15%/frame toward quiet.
+    this.smoothedLevel = Math.max(rms, this.smoothedLevel * 0.85);
+
+    this.frameCount += 1;
+    if (this.frameCount % LEVEL_EMIT_EVERY !== 0) return;
+    const level = Math.min(1, this.smoothedLevel / LEVEL_FULL_SCALE);
+    for (const cb of this.levelCbs) cb(level);
   }
 }

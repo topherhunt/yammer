@@ -40,6 +40,36 @@
     border-color: rgb(255 255 255 / 0.16);
   }
 
+  /* Each new chat entry grows from height 0 to its natural height over 300ms.
+     The grid-rows 0fr->1fr technique animates to auto height (which plain height
+     can't); the inner element clips its own overflow while the row is collapsed. */
+  .qa-chat-anim {
+    display: grid;
+    grid-template-rows: 1fr;
+    animation: qa-chat-grow 300ms ease;
+  }
+  .qa-chat-anim > .qa-chat-anim-inner {
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  @keyframes qa-chat-grow {
+    from {
+      grid-template-rows: 0fr;
+      opacity: 0;
+    }
+    to {
+      grid-template-rows: 1fr;
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .qa-chat-anim {
+      animation: none;
+    }
+  }
+
   /* Recency-fading yellow edit highlight. Opacity is driven per-range by the
      CodeMirror decoration via the --hl-opacity custom property (see
      highlight-extension.ts), so older edits are more faded. */

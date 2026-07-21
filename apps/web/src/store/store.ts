@@ -50,6 +50,10 @@ export interface AppStore {
   usages: Usage[];
   /** True while the mic detects speech (drives the pulse indicator). */
   vadActive: boolean;
+  /** Smoothed mic input level, 0..1, updated ~30x/s while listening. Drives the
+   * amplitude-reactive size/glow of the mic button so the user can see it hearing
+   * them. 0 when not listening. */
+  micLevel: number;
   sttPhase: SttPhase;
   /** Machine-derived: "finalizing" while an utterance is finalizing or in the
    * pre-send grace window (drives the radial). Distinct from `sttPhase`, which
@@ -80,6 +84,8 @@ export interface AppStore {
   pushVoiceError: (message: string) => void;
   /** Push the voice pipeline's derived indicator signals into the view. */
   setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
+  /** Push the current smoothed mic input level (0..1) into the view. */
+  setMicLevel: (level: number) => void;
   /** Apply one action from a UI control (default author "user"). */
   dispatch: (action: Action, author?: Author) => void;
   /** Update one or more settings from the Settings dialog: merge into
@@ -427,7 +433,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       else if (state === "listening") deps.stt.start();
       else deps.stt.stop();
       if (state !== "listening") {
-        set({ vadActive: false, sttPhase: "idle", listeningPhase: "idle" });
+        // Not listening: the STT mic is stopped, so no more level updates arrive --
+        // zero it now so the button rests at its normal size instead of frozen.
+        set({
+          vadActive: false,
+          micLevel: 0,
+          sttPhase: "idle",
+          listeningPhase: "idle",
+        });
       }
     }
 
@@ -610,6 +623,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       app: initialState(deps.initial),
       usages: [],
       vadActive: false,
+      micLevel: 0,
       sttPhase: "idle",
       listeningPhase: "idle",
       micStarted: false,
@@ -672,6 +686,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
 
       setVoiceIndicator({ vad, finalizing }) {
         set({ vadActive: vad, listeningPhase: finalizing ? "finalizing" : "idle" });
+      },
+
+      setMicLevel(level) {
+        set({ micLevel: level });
       },
 
       dispatch(action, author = "user") {

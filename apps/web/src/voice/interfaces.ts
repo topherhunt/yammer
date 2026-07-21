@@ -14,6 +14,9 @@ export interface MicCapture {
   stop(): void;
   /** One PCM16 frame per callback invocation. */
   onFrame(cb: (frame: Int16Array) => void): void;
+  /** Optional: smoothed input level (0..1), emitted ~30x/s while capturing, for the
+   * amplitude-reactive mic indicator. Real impl only; fakes may omit it. */
+  onLevel?(cb: (level: number) => void): void;
 }
 
 /** Voice-activity detection. Real impl = @ricky0123/vad-web (Silero WASM); the

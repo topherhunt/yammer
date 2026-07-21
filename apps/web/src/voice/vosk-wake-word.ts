@@ -23,31 +23,45 @@ const DEFAULT_MODEL_URL = "/models/vosk-model-small-en-us.tar.gz";
 const WAKE_PHRASE = "yammer wake up";
 const GRAMMAR = JSON.stringify([WAKE_PHRASE, "[unk]"]);
 
-// Minimum per-word confidence to accept a wake. The grammar makes even a weak
-// "yam" transcribe as the full phrase, but the words you did not actually say
-// come back with low confidence -- so this is the real false-wake filter. Tune
-// UP to be stricter (fewer false wakes, more misses on an unclear voice); tune
-// DOWN if the real phrase is being missed.
+// Mean per-word confidence required to accept a wake. The grammar makes even a
+// weak "yam" transcribe as the full phrase, but the words you did not actually say
+// come back with low confidence -- so the AVERAGE confidence is the real false-wake
+// filter: a genuine "Yammer, wake up" averages high, a hallucinated one averages
+// low. (Averaging, not every-word: a single mumbled-but-real word shouldn't block a
+// wake.) Tune UP to be stricter (fewer false wakes, more misses on an unclear
+// voice); tune DOWN if the real phrase is being missed. Override at runtime with
+// VITE_VOSK_MIN_CONFIDENCE.
 const DEFAULT_MIN_CONFIDENCE = 0.4;
+
+// Set VITE_VOSK_DEBUG=1 to log every final result Vosk produces while paused
+// (recognized text + per-word confidences + the mean), so wake sensitivity can be
+// calibrated against what the model actually hears. Off by default.
+const WAKE_DEBUG = import.meta.env.VITE_VOSK_DEBUG === "1";
 
 interface VoskResult {
   text: string;
   result?: Array<{ conf: number; word: string }>;
 }
 
-/** Accept only when the recognized text IS the wake phrase and every recognized
- * word clears the confidence bar. Uses the min (every) rather than average so a
- * single confidently-absent word ("wake"/"up" you didn't say) blocks the wake. */
+/** Mean per-word confidence of a Vosk result, or 0 if it carried no words. */
+function meanConfidence(result: VoskResult): number {
+  const words = result.result ?? [];
+  if (words.length === 0) return 0;
+  const total = words.reduce((sum, w) => sum + w.conf, 0);
+  return total / words.length;
+}
+
+/** Accept only when the recognized text IS the wake phrase and the mean word
+ * confidence clears the bar. */
 function isConfidentWake(result: VoskResult, minConfidence: number): boolean {
   if (!result.text.toLowerCase().includes(WAKE_PHRASE)) return false;
-  const words = result.result ?? [];
-  return words.length > 0 && words.every((w) => w.conf >= minConfidence);
+  return (result.result?.length ?? 0) > 0 && meanConfidence(result) >= minConfidence;
 }
 
 export interface VoskWakeWordOptions {
   /** URL of a Vosk model .tar.gz (host it in the web app's public dir). */
   modelUrl?: string;
-  /** Per-word confidence bar for a wake (0..1). Default 0.7. */
+  /** Mean per-word confidence bar for a wake (0..1). Default 0.4. */
   minConfidence?: number;
 }
 
@@ -135,6 +149,14 @@ export class VoskWakeWord implements WakeWordDetector {
   }
 
   private consider(result: VoskResult): void {
+    if (WAKE_DEBUG && result.text) {
+      const mean = meanConfidence(result).toFixed(2);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[wake-word] heard "${result.text}" mean-conf=${mean} (bar ${this.minConfidence})`,
+        result.result,
+      );
+    }
     if (this.running && isConfidentWake(result, this.minConfidence)) {
       // Fire once per activation; stop() before re-arming on the next pause.
       this.stop();

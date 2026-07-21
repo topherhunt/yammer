@@ -20,11 +20,23 @@ export function ListeningIndicator() {
   const listening = useAppStore((s) => s.app.listening);
   const vad = useAppStore((s) => s.vadActive);
   const phase = useAppStore((s) => s.sttPhase);
+  const micLevel = useAppStore((s) => s.micLevel);
 
   const listeningPhase = useAppStore((s) => s.listeningPhase);
   const isListening = listening === "listening";
   const busy = phase === "sending" || listeningPhase === "finalizing";
   const pulsing = isListening && vad;
+
+  // Amplitude-reactive size + glow: while listening, the mic grows and brightens
+  // with the smoothed input level, so the user can see it hearing them (it rests at
+  // normal size on silence, since micLevel decays to 0). Transform (not box-shadow)
+  // so it composes with the .qa-mic-pulsing ring instead of overriding it.
+  const micStyle = isListening
+    ? {
+        transform: `scale(${(1 + micLevel * 0.4).toFixed(3)})`,
+        filter: `brightness(${(1 + micLevel * 0.5).toFixed(3)})`,
+      }
+    : undefined;
 
   const toggle = () => {
     // Soft pause (not hard mute) so the wake word keeps the resume hands-free.
@@ -45,8 +57,10 @@ export function ListeningIndicator() {
         onClick={toggle}
         aria-pressed={isListening}
         aria-label="Toggle microphone"
+        style={micStyle}
         className={cx(
           "qa-mic-button btn-3d relative grid place-items-center h-10 w-10 rounded-full text-white",
+          "transition-transform duration-75 ease-out will-change-transform",
           isListening ? "bg-red-500" : "bg-gray-400 dark:bg-gray-600",
           pulsing && "qa-mic-pulsing",
         )}

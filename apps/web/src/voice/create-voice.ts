@@ -43,6 +43,9 @@ export function createVoice(
   void sfx.preload();
 
   const mic = new BrowserMicCapture();
+  // Feed the smoothed mic level into the store so the mic button pulses with the
+  // user's voice (amplitude-reactive size/glow). Zeroed when listening stops.
+  mic.onLevel((level) => store.getState().setMicLevel(level));
   const vad = new SileroVadDetector();
   const stt = new WsSttClient({
     socketFactory: () => new WebSocket(sttUrl) as unknown as WebSocketLike,

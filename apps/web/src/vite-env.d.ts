@@ -8,6 +8,8 @@ interface ImportMetaEnv {
   readonly VITE_MOCK?: string;
   /** URL of the Vosk wake-word model .tar.gz. Defaults to a public path. */
   readonly VITE_VOSK_MODEL_URL?: string;
-  /** Per-word confidence bar for the wake word (0..1). Higher = stricter. */
+  /** Mean-confidence bar for the wake word (0..1). Higher = stricter. */
   readonly VITE_VOSK_MIN_CONFIDENCE?: string;
+  /** "1" logs every final wake-word result (text + confidences) for tuning. */
+  readonly VITE_VOSK_DEBUG?: string;
 }

@@ -24,6 +24,10 @@ import { sttClientMessageSchema } from "@yammer/shared";
 export interface SttUpstream {
   /** Send one raw audio frame (PCM bytes); the adapter wraps it for the wire. */
   send(audio: Uint8Array): void;
+  /** Commit the audio buffered upstream so far, forcing transcription of the
+   * current utterance and a `...transcription.completed` (final) event. Called
+   * when the client signals end-of-speech (see SttCommitMessage). */
+  commit(): void;
   close(code?: number): void;
   /** Fires when the upstream socket reaches OPEN and can accept audio. */
   onOpen(cb: () => void): void;
@@ -136,6 +140,9 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
   const pending: Uint8Array[] = [];
   let totalBytes = 0;
   let bytesSinceFinal = 0;
+  // A commit that arrived before the upstream was OPEN: the buffered audio is
+  // flushed on open, then this fires the deferred commit so no utterance is lost.
+  let pendingCommit = false;
 
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let durationTimer: ReturnType<typeof setTimeout> | null = null;
@@ -211,6 +218,12 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
       upstream?.send(frame);
     }
     pending.length = 0;
+    // A commit signalled while we were still buffering applies now that the
+    // just-flushed audio is upstream.
+    if (pendingCommit) {
+      pendingCommit = false;
+      upstream?.commit();
+    }
     send({ type: "ready" });
   };
 
@@ -269,6 +282,16 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
         send({ type: "error", message: upstreamErrorMessage(err) });
         closeBoth("server_error");
       });
+      return;
+    }
+
+    if (message.type === "commit") {
+      // End-of-speech: force the upstream to transcribe what it has buffered.
+      // Before start / before the upstream is OPEN, remember to commit once the
+      // buffered leading edge has been flushed (onUpstreamOpen).
+      if (!started || !upstream) return;
+      if (upstreamOpen) upstream.commit();
+      else pendingCommit = true;
       return;
     }
 

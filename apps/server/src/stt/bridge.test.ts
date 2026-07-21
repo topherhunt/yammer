@@ -19,9 +19,13 @@ function fakeUpstream() {
   let closeCb: (() => void) | undefined;
   let errorCb: ((e: unknown) => void) | undefined;
   const sent: Uint8Array[] = [];
+  let commits = 0;
   let closed = false;
   const upstream: SttUpstream = {
     send: (d) => sent.push(d),
+    commit: () => {
+      commits += 1;
+    },
     close: () => {
       closed = true;
     },
@@ -41,6 +45,7 @@ function fakeUpstream() {
   return {
     upstream,
     sent,
+    commits: () => commits,
     isClosed: () => closed,
     emitOpen: () => openCb?.(),
     emitMessage: (d: unknown) => messageCb?.(d),
@@ -199,6 +204,41 @@ describe("createSttBridge -- buffer until open", () => {
     // Post-open audio goes straight through.
     h.bridge.onClientMessage(audio(30), true);
     expect(h.up.sent.map((f) => f.byteLength)).toEqual([10, 20, 30]);
+  });
+});
+
+describe("createSttBridge -- commit (end-of-speech)", () => {
+  it("forwards a `commit` control message to the upstream once open", () => {
+    const h = harness();
+    h.bridge.onClientMessage(startFrame(24_000), false);
+    h.up.emitOpen();
+    h.bridge.onClientMessage(audio(48_000), true);
+
+    h.bridge.onClientMessage(JSON.stringify({ type: "commit" }), false);
+    expect(h.up.commits()).toBe(1);
+    // A commit is not a session teardown -- the session stays open for more audio.
+    expect(h.client.isClosed()).toBe(false);
+  });
+
+  it("defers a commit that arrives before the upstream is open, firing it after the buffered audio flushes", () => {
+    const h = harness();
+    h.bridge.onClientMessage(startFrame(24_000), false);
+    // Audio + commit both arrive while the upstream is still connecting.
+    h.bridge.onClientMessage(audio(24_000), true);
+    h.bridge.onClientMessage(JSON.stringify({ type: "commit" }), false);
+    expect(h.up.commits()).toBe(0); // nothing sent upstream yet
+
+    h.up.emitOpen();
+    // The buffered audio is flushed first, THEN the deferred commit fires.
+    expect(h.up.sent.map((f) => f.byteLength)).toEqual([24_000]);
+    expect(h.up.commits()).toBe(1);
+  });
+
+  it("ignores a commit before `start` (no upstream to commit)", () => {
+    const h = harness();
+    h.bridge.onClientMessage(JSON.stringify({ type: "commit" }), false);
+    expect(h.openedUpstream()).toBe(false);
+    expect(h.client.isClosed()).toBe(false);
   });
 });
 
