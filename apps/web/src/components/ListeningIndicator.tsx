@@ -50,7 +50,11 @@ export function ListeningIndicator() {
         </span>
         {busy && <span className="qa-radial" aria-label="Working" />}
       </button>
-      <span className="qa-listening-state text-sm text-gray-600 dark:text-gray-300">
+      <span
+        role="status"
+        aria-live="polite"
+        className="qa-listening-state text-sm text-gray-600 dark:text-gray-300"
+      >
         {busy ? "Working…" : LABELS[listening]}
       </span>
     </div>

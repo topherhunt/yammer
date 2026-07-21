@@ -35,6 +35,9 @@ function makeStore(
     api?: MockApiConfig;
     initial?: Partial<AppState>;
     retryDelayMs?: (attempt: number) => number;
+    reDrainDelayMs?: number;
+    startCapture?: () => Promise<void>;
+    voiceReady?: boolean;
   } = {},
 ) {
   const api = new MockApiClient(config.api);
@@ -48,6 +51,11 @@ function makeStore(
     initial: config.initial ?? openDocState,
     // Drop the backoff in tests; the retry semantics are what we assert, not wall time.
     retryDelayMs: config.retryDelayMs ?? (() => 0),
+    // A huge default so the exhausted-retry re-drain timer never fires mid-test
+    // (tests that exercise re-drain override it or use the `online` event).
+    reDrainDelayMs: config.reDrainDelayMs ?? 10_000_000,
+    ...(config.startCapture ? { startCapture: config.startCapture } : {}),
+    ...(config.voiceReady !== undefined ? { voiceReady: config.voiceReady } : {}),
   });
   return { store, api, stt };
 }
@@ -283,6 +291,158 @@ describe("durable version persistence", () => {
       message: expect.stringMatching(/changed on another device/i),
     });
     expect(store.getState().lastError).toMatch(/reloaded from the server/i);
+  });
+});
+
+describe("persist re-drain after exhausted retries", () => {
+  it("resumes and persists a stranded edit when the `online` event fires", async () => {
+    let allow = false;
+    const { store, api } = makeStore({
+      api: {
+        persistFailer: () => {
+          // Fail until connectivity is 'restored', then let it through.
+          if (!allow) throw new Error("offline");
+        },
+      },
+    });
+
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    await store.getState().flushPersistQueue();
+
+    // Exhausted the retries and paused at the head -- the edit is kept, not dropped.
+    expect(api.persistedVersions).toHaveLength(0);
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+
+    // Connectivity returns: the queue resumes without any further user action and
+    // the stranded edit finally persists.
+    allow = true;
+    window.dispatchEvent(new Event("online"));
+    await store.getState().flushPersistQueue();
+
+    expect(api.persistedVersions.map((v) => v.id)).toEqual(["id-1"]);
+  });
+
+  it("reschedules a delayed re-drain (does not need another edit) after exhaustion", async () => {
+    let allow = false;
+    const { store, api } = makeStore({
+      reDrainDelayMs: 0, // fire on the next macrotask
+      api: {
+        persistFailer: () => {
+          if (!allow) throw new Error("offline");
+        },
+      },
+    });
+
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    await store.getState().flushPersistQueue();
+    expect(api.persistedVersions).toHaveLength(0);
+
+    // The re-drain timer fires on its own; the recovered connection persists it.
+    allow = true;
+    await flush(); // let the 0ms re-drain timer run
+    await store.getState().flushPersistQueue();
+    expect(api.persistedVersions.map((v) => v.id)).toEqual(["id-1"]);
+  });
+});
+
+describe("scoped 409 conflict (other documents' edits survive)", () => {
+  it("drops only the conflicting document's queued edits, not another doc's", async () => {
+    // d1 (the initial doc) will 409; a new document's create version must survive.
+    const { store, api } = makeStore({
+      api: {
+        persistFailer: (_attempt, version) => {
+          if (version.documentId === "d1") {
+            const err = new Error("seq conflict") as Error & { status: number };
+            err.status = 409;
+            throw err;
+          }
+        },
+        documentPayloads: {
+          d1: {
+            document: { id: "d1", name: "Doc", text: "server", currentVersionId: "v0", currentSeq: 0 },
+            history: [createV],
+          },
+        },
+      },
+    });
+
+    // Queue two persists in one tick: an edit on d1 (will 409) and a brand-new
+    // document (different documentId). Both are enqueued before the drain yields.
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    store.getState().dispatch({ type: "new_document", name: "Second" });
+    await store.getState().flushPersistQueue();
+
+    // The d1 edit conflicted and was reconciled away; the OTHER document's create
+    // version was NOT dropped -- it persisted.
+    const persistedDocs = api.persistedVersions.map((v) => v.documentId);
+    expect(persistedDocs).not.toContain("d1");
+    expect(persistedDocs.some((id) => id !== "d1")).toBe(true);
+    // The 409 was surfaced to the user.
+    expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(true);
+  });
+});
+
+describe("voice-error channel + capture-start gating", () => {
+  it("pushVoiceError surfaces a voice failure into the chat error log", () => {
+    const { store } = makeStore();
+    store.getState().pushVoiceError("STT connection lost -- reconnecting…");
+    expect(store.getState().app.chat.at(-1)).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reconnect/i),
+    });
+    expect(store.getState().lastError).toMatch(/reconnect/i);
+  });
+
+  it("does NOT enter listening and surfaces an error when capture is denied", async () => {
+    const startCapture = () => Promise.reject(new Error("Permission denied"));
+    const { store } = makeStore({ startCapture });
+
+    store.getState().startMic();
+    await flush();
+
+    // The mic was never confirmed: stay in the gate (micStarted false), and the
+    // listening state must NOT lie.
+    expect(store.getState().micStarted).toBe(false);
+    expect(store.getState().app.listening).not.toBe("listening");
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+    expect(store.getState().lastError).toMatch(/microphone access failed/i);
+  });
+
+  it("enters listening only after capture is confirmed", async () => {
+    const startCapture = () => Promise.resolve();
+    const { store } = makeStore({ startCapture });
+
+    store.getState().startMic();
+    // Not yet: capture confirmation is async, so no optimistic flip.
+    expect(store.getState().micStarted).toBe(false);
+
+    await flush();
+    expect(store.getState().micStarted).toBe(true);
+    expect(store.getState().app.listening).toBe("listening");
+  });
+});
+
+describe("early-tap race (voice pipeline not yet ready)", () => {
+  it("queues a tap that arrives before ready, then starts on setVoiceReady", async () => {
+    let capture: (() => Promise<void>) | null = null;
+    const { store } = makeStore({
+      voiceReady: false,
+      startCapture: () => (capture ? capture() : Promise.resolve()),
+    });
+    capture = () => Promise.resolve();
+
+    // The user taps before the late-bound voice pipeline is ready.
+    store.getState().startMic();
+    expect(store.getState().startQueued).toBe(true);
+    expect(store.getState().micStarted).toBe(false);
+    expect(store.getState().app.listening).not.toBe("listening");
+
+    // The pipeline becomes ready: the queued tap runs and listening actually starts.
+    store.getState().setVoiceReady(true);
+    await flush();
+    expect(store.getState().startQueued).toBe(false);
+    expect(store.getState().micStarted).toBe(true);
+    expect(store.getState().app.listening).toBe("listening");
   });
 });
 

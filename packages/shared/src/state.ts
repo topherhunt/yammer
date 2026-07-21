@@ -2,6 +2,8 @@
 // requests it emits for the edges (persistence, network, mic, audio) to carry
 // out. Nothing here depends on the DOM, network, or a DB.
 
+import { z } from "zod";
+
 export type Theme = "system" | "light" | "dark";
 export type SortKey = "name" | "created" | "updated";
 export type DialogKind = "menu" | "help" | "load" | "history";
@@ -40,6 +42,40 @@ export interface Version {
   createdAt: string; // ISO 8601
   restoredFromVersionId?: string;
 }
+
+/**
+ * Zod schemas mirroring DiffHunk + Version, kept deliberately in lockstep with the
+ * interfaces above (any field change must be made in both). The server validates a
+ * client-supplied version envelope with `versionSchema` at the persistence edge, so
+ * a malformed body is a clean 400 rather than an inconsistent snapshot or a 500 on a
+ * NULL column. The `satisfies` assertions below fail the build if the shapes drift.
+ */
+export const diffHunkSchema = z.object({
+  kind: z.enum(["add", "remove", "context"]),
+  value: z.string(),
+});
+
+export const versionSchema = z.object({
+  id: z.string().min(1),
+  documentId: z.string().min(1),
+  seq: z.number().int().nonnegative(), // the create version is seq 0
+  parentVersionId: z.string().nullable(),
+  author: z.enum(["user", "ai"]),
+  kind: z.enum(["create", "edit", "restore", "rename", "undo", "redo"]),
+  summary: z.string(),
+  fullText: z.string(),
+  diff: z.array(diffHunkSchema),
+  createdAt: z.string().min(1),
+  restoredFromVersionId: z.string().optional(),
+});
+
+// Compile-time guard that schema and interface stay consistent in BOTH directions
+// (an unused type alias never trips a lint, but a shape mismatch fails the build).
+type AssertExtends<A extends B, B> = true;
+type _DiffHunkFwd = AssertExtends<z.infer<typeof diffHunkSchema>, DiffHunk>;
+type _DiffHunkBwd = AssertExtends<DiffHunk, z.infer<typeof diffHunkSchema>>;
+type _VersionFwd = AssertExtends<z.infer<typeof versionSchema>, Version>;
+type _VersionBwd = AssertExtends<Version, z.infer<typeof versionSchema>>;
 
 /** Row shown in the Load Document dialog. */
 export interface DocumentMeta {

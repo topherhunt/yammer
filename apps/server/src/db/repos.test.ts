@@ -3,6 +3,8 @@ import { createVersion } from "@yammer/core";
 import { defaultSettings, type Version } from "@yammer/shared";
 import { createTestDb, seedUser } from "../test-support";
 import { DuplicateNameError, isUniqueViolation } from "./repos";
+import { documents as documentsTable, versions as versionsTable } from "./schema";
+import { eq } from "drizzle-orm";
 
 async function nextVersion(
   repos: ReturnType<typeof createTestDb>["repos"],
@@ -171,6 +173,59 @@ describe("VersionsRepo append advances the document head", () => {
     // The losing append wrote nothing: history + head are unchanged.
     expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
     expect((await repos.documents.get(user.id, doc.id))?.currentVersionId).toBe(first.id);
+  });
+});
+
+describe("write atomicity (version append + document create)", () => {
+  it("append is atomic: a fault on the head-advance rolls the version insert back too (no bricked doc)", async () => {
+    // Fail ONLY the head-advance UPDATE. The version INSERT runs first inside the
+    // same transaction; if the pair were not atomic the version would persist while
+    // the head never moved -- bricking the doc (every future seq-1 append would then
+    // hit UNIQUE(doc,seq) forever). The transaction must roll the insert back too.
+    const { db, repos } = createTestDb({
+      failOn: (sql) =>
+        sql.toLowerCase().includes('update "documents"') &&
+        sql.includes("current_version_id"),
+    });
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const v1 = await nextVersion(repos, user.id, doc.id, "hello");
+
+    await expect(repos.versions.append(user.id, v1)).rejects.toThrow(
+      /injected write fault/,
+    );
+
+    // Neither write survived: no seq-1 version row, and the head still points at the
+    // seq-0 create version -- the document is intact, not bricked.
+    expect(
+      (await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq),
+    ).toEqual([0]);
+    expect(await repos.versions.get(user.id, v1.id)).toBeNull();
+    const head = await repos.documents.get(user.id, doc.id);
+    expect(head?.currentSeq).toBe(0);
+    expect(head?.currentVersionId).toBe(doc.currentVersionId);
+  });
+
+  it("document create is atomic: a fault on the seq-0 version insert rolls the document row back", async () => {
+    // Fail the version INSERT (the second write). The document row is inserted first;
+    // if the pair were not atomic a doc row would survive with a currentVersionId
+    // pointing at a version that was never written -- reads would 500 forever.
+    const { db, repos } = createTestDb({
+      failOn: (sql) => sql.toLowerCase().includes('insert into "versions"'),
+    });
+    const user = await seedUser(repos);
+
+    await expect(
+      repos.documents.create(user.id, { name: "Doc" }),
+    ).rejects.toThrow(/injected write fault/);
+
+    // Neither the document row nor its seq-0 version persisted -- rolled back together.
+    expect(await repos.documents.list(user.id, "updated")).toEqual([]);
+    expect(await repos.documents.findByName(user.id, "Doc")).toBeNull();
+    expect(
+      await db.select().from(documentsTable).where(eq(documentsTable.name, "Doc")),
+    ).toEqual([]);
+    expect(await db.select().from(versionsTable)).toEqual([]);
   });
 });
 

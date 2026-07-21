@@ -87,21 +87,31 @@ export function attachSttUpgrade(server: ServerType, deps: SttUpgradeDeps): void
       return;
     }
 
-    void authenticateUpgrade(deps.repos, req.headers.cookie).then((userId) => {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        const bridge = createSttBridge({
-          client: wsClientChannel(ws),
-          userId,
-          openUpstream: deps.openUpstream,
-          limits: deps.limits,
-          concurrency: deps.concurrency,
+    authenticateUpgrade(deps.repos, req.headers.cookie)
+      .then((userId) => {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          const bridge = createSttBridge({
+            client: wsClientChannel(ws),
+            userId,
+            openUpstream: deps.openUpstream,
+            limits: deps.limits,
+            concurrency: deps.concurrency,
+          });
+          ws.on("message", (data, isBinary) =>
+            bridge.onClientMessage(data, isBinary),
+          );
+          ws.on("close", () => bridge.onClientClose());
+          ws.on("error", () => bridge.onClientClose());
         });
-        ws.on("message", (data, isBinary) =>
-          bridge.onClientMessage(data, isBinary),
-        );
-        ws.on("close", () => bridge.onClientClose());
-        ws.on("error", () => bridge.onClientClose());
+      })
+      .catch((err: unknown) => {
+        // authenticateUpgrade can reject: the DB lookup may throw (transient outage)
+        // or getSessionSecret() may throw (missing SESSION_SECRET). Without this
+        // catch the rejection is unhandled (fatal under strict handlers) and the raw
+        // socket is left open, leaking an FD. Destroy it and log; never rethrow.
+        // eslint-disable-next-line no-console
+        console.error("STT upgrade authentication failed:", err);
+        socket.destroy();
       });
-    });
   });
 }

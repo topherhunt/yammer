@@ -8,11 +8,12 @@
 
 import { randomUUID } from "node:crypto";
 import type { Context } from "hono";
-import type { SituationalContext, Usage } from "@yammer/shared";
+import type { Usage } from "@yammer/shared";
 import { parseLlmResponse } from "@yammer/core";
 import type { RouteDeps } from "./routes";
 import { requireUser } from "../auth/session";
 import { buildSystemPrompt, renderUserMessage } from "./prompt";
+import { turnRequestSchema } from "./validation";
 
 function combineUsage(sttSeconds: number, llmUsage: Usage): Usage {
   return {
@@ -28,28 +29,26 @@ export async function handleTurn(
   deps: RouteDeps,
 ): Promise<Response> {
   const user = requireUser(c);
-  const body = (await c.req.json().catch(() => null)) as {
-    transcript?: unknown;
-    context?: unknown;
-    documentId?: unknown;
-    sttSeconds?: unknown;
-    sttMeta?: unknown;
-  } | null;
+  const raw = await c.req.json().catch(() => null);
 
-  if (
-    !body ||
-    typeof body.transcript !== "string" ||
-    typeof body.context !== "object" ||
-    body.context === null
-  ) {
-    return c.json({ error: "transcript (string) and context (object) are required" }, 400);
+  // Validate transcript + the full SituationalContext up front. Without this a
+  // malformed context (e.g. `{}`) 500s in renderUserMessage, which dereferences
+  // context.recentChat.length unconditionally. A bad body is a clean 400 instead.
+  const parsedBody = turnRequestSchema.safeParse(raw);
+  if (!parsedBody.success) {
+    return c.json(
+      {
+        error: "transcript (string) and context (SituationalContext) are required",
+        detail: parsedBody.error.issues,
+      },
+      400,
+    );
   }
 
-  const transcript = body.transcript;
-  const context = body.context as SituationalContext;
-  const documentId = typeof body.documentId === "string" ? body.documentId : undefined;
-  const sttSeconds = typeof body.sttSeconds === "number" ? body.sttSeconds : 0;
-  const sttMeta = body.sttMeta ?? null;
+  const { transcript, context } = parsedBody.data;
+  const documentId = parsedBody.data.documentId;
+  const sttSeconds = parsedBody.data.sttSeconds ?? 0;
+  const sttMeta = parsedBody.data.sttMeta ?? null;
   const model = process.env.LLM_MODEL ?? "gpt-5.6-luna";
 
   // Relay the turn to the model. A provider failure is surfaced (never swallowed)

@@ -9,6 +9,12 @@ import type { VadDetector } from "./interfaces";
 //
 // The VAD immediately drives the pulse indicator (no network round-trip) and
 // gates when the STT client streams audio, so pure silence is not sent or billed.
+//
+// stop() fully DESTROYS the VAD -- releasing its getUserMedia MediaStream and
+// AudioContext -- rather than just pausing the algorithm. A mere pause() leaves
+// the OS "mic in use" indicator lit while the user believes they are muted, a
+// privacy/trust failure; teardown extinguishes it. A subsequent start() rebuilds
+// the graph. Callbacks are kept across rebuilds (they close over these arrays).
 
 export class SileroVadDetector implements VadDetector {
   private vad: MicVAD | null = null;
@@ -30,7 +36,11 @@ export class SileroVadDetector implements VadDetector {
   }
 
   stop(): void {
-    void this.vad?.pause();
+    // Fully release the stream + AudioContext, not just pause() the algorithm, so
+    // the mic-in-use indicator actually goes dark on mute.
+    const vad = this.vad;
+    this.vad = null;
+    void vad?.destroy();
   }
 
   onSpeechStart(cb: () => void): void {

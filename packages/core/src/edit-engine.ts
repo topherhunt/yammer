@@ -31,6 +31,9 @@ export function applyEdits(text: string, edits: FindReplace[]): string {
 }
 
 function allIndices(haystack: string, needle: string): number[] {
+  // An empty needle would match at every position and never advance -- guard it
+  // even though the action schema (find.min(1)) makes it unreachable in practice.
+  if (needle === "") return [];
   const out: number[] = [];
   let from = haystack.indexOf(needle);
   while (from !== -1) {

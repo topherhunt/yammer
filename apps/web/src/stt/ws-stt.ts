@@ -41,6 +41,13 @@ export interface WsSttOptions {
   /** Cap on frames buffered before the server signals `ready`, so a slow upstream
    * can't grow memory without bound. Oldest frames drop past the cap. */
   maxPrebufferFrames?: number;
+  /** Bounded auto-reconnect on an UNEXPECTED socket drop. Cap on retries before
+   * we give up and surface a persistent error (default 5). An intentional stop()
+   * never reconnects. */
+  maxReconnectAttempts?: number;
+  /** Backoff before the Nth (0-based) reconnect attempt, in ms. Default is a
+   * bounded exponential; overridable so tests can drop the wait. */
+  reconnectDelayMs?: (attempt: number) => number;
 }
 
 export class WsSttClient implements SttProvider {
@@ -59,8 +66,20 @@ export class WsSttClient implements SttProvider {
 
   private readonly maxPrebufferFrames: number;
 
+  /** True once stop() was called intentionally -- suppresses auto-reconnect. A
+   * fresh start() clears it. */
+  private stopping = false;
+  private readonly maxReconnectAttempts: number;
+  private readonly reconnectDelayMs: (attempt: number) => number;
+  private reconnectAttempts = 0;
+  private reconnectScheduled = false;
+  private reconnectHandle: ReturnType<typeof setTimeout> | null = null;
+
   constructor(private readonly opts: WsSttOptions) {
     this.maxPrebufferFrames = opts.maxPrebufferFrames ?? 200;
+    this.maxReconnectAttempts = opts.maxReconnectAttempts ?? 5;
+    this.reconnectDelayMs =
+      opts.reconnectDelayMs ?? ((attempt) => Math.min(8000, 250 * 2 ** attempt));
     opts.mic.onFrame((frame) => this.onMicFrame(frame));
     opts.vad.onSpeechStart(() => {
       this.speaking = true;
@@ -72,12 +91,37 @@ export class WsSttClient implements SttProvider {
     });
   }
 
-  start(): void {
-    if (this.socket) return; // already streaming
+  /** Open the STT session and confirm capture. The socket + audio graph come up;
+   * the returned promise resolves only once mic + VAD capture is CONFIRMED and
+   * rejects if getUserMedia/permission is denied -- so the caller never enters a
+   * lying "listening" state before the mic is actually live. */
+  start(): Promise<void> {
+    if (this.socket) return Promise.resolve(); // already streaming
+    this.stopping = false;
     this.ready = false;
     this.speaking = false;
     this.prebuffer = [];
+    this.reconnectAttempts = 0;
+    this.reconnectScheduled = false;
 
+    this.openSocket();
+
+    // Confirm capture before reporting success. A denial tears the half-open
+    // session down and propagates, rather than leaving a dead mic that still
+    // says "Listening".
+    return Promise.all([this.opts.mic.start(), this.opts.vad.start()])
+      .then(() => undefined)
+      .catch((err) => {
+        this.stop();
+        throw new Error(`Microphone capture failed: ${errMessage(err)}`);
+      });
+  }
+
+  /** Open (or re-open) the raw socket and wire its lifecycle. Reused by start()
+   * and by the auto-reconnect path, so a reconnect re-sends the `start` control
+   * message (via onopen) and resumes streaming without touching the mic/VAD,
+   * which stay running across a drop. */
+  private openSocket(): void {
     const socket = this.opts.socketFactory();
     socket.binaryType = "arraybuffer";
     this.socket = socket;
@@ -91,23 +135,52 @@ export class WsSttClient implements SttProvider {
       socket.send(JSON.stringify(start));
     };
     socket.onmessage = (ev) => this.onServerMessage(ev.data);
-    socket.onerror = () => this.opts.onError?.("STT socket error");
+    // An unexpected error or close must surface AND reconnect (both funnel to
+    // handleDrop, which de-dupes so a paired error+close schedules one reconnect).
+    socket.onerror = () => this.handleDrop();
     socket.onclose = () => {
       this.socket = null;
       this.ready = false;
+      this.handleDrop();
     };
+  }
 
-    // Begin capturing immediately; frames are buffered until `ready`.
-    void this.opts.mic.start().catch((err) =>
-      this.opts.onError?.(`Mic capture failed: ${errMessage(err)}`),
-    );
-    void this.opts.vad.start().catch((err) =>
-      this.opts.onError?.(`VAD start failed: ${errMessage(err)}`),
-    );
+  /** An UNEXPECTED socket drop (error/close not initiated by stop()): surface it
+   * and schedule a bounded, backed-off reconnect. When retries are exhausted,
+   * surface a clear persistent error and give up. */
+  private handleDrop(): void {
+    if (this.stopping) return; // intentional stop -- never reconnect
+    if (this.reconnectScheduled) return; // a paired error+close -- handle once
+    this.socket = null;
+    this.ready = false;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.opts.onError?.(
+        `STT connection lost and could not be restored after ${this.maxReconnectAttempts} attempts. Please tap the mic to restart listening.`,
+      );
+      return;
+    }
+
+    const attempt = this.reconnectAttempts;
+    this.reconnectAttempts += 1;
+    this.reconnectScheduled = true;
+    this.opts.onError?.("STT connection lost -- reconnecting…");
+    this.reconnectHandle = setTimeout(() => {
+      this.reconnectHandle = null;
+      this.reconnectScheduled = false;
+      if (this.stopping || this.socket) return;
+      this.openSocket(); // mic/VAD still running; frames re-buffer until `ready`
+    }, this.reconnectDelayMs(attempt));
   }
 
   stop(): void {
     const socket = this.socket;
+    this.stopping = true;
+    this.reconnectScheduled = false;
+    if (this.reconnectHandle !== null) {
+      clearTimeout(this.reconnectHandle);
+      this.reconnectHandle = null;
+    }
     this.opts.mic.stop();
     this.opts.vad.stop();
     this.speaking = false;
@@ -173,6 +246,9 @@ export class WsSttClient implements SttProvider {
     switch (msg.type) {
       case "ready":
         this.ready = true;
+        // A confirmed (re)connection refreshes the retry budget, so a later drop
+        // gets the full reconnect allowance again.
+        this.reconnectAttempts = 0;
         this.flushPrebuffer();
         break;
       case "interim":

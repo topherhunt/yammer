@@ -65,6 +65,26 @@ function pick<T extends ActionType>(
 const has = (haystack: string, needle: string): boolean =>
   haystack.toLowerCase().includes(needle.toLowerCase());
 
+/** Actions that mutate the document text or its history -- exactly what the model
+ * must NOT do when it should be asking a clarifying question instead of guessing. */
+const MUTATING_ACTIONS: ReadonlySet<ActionType> = new Set<ActionType>([
+  "edit_text",
+  "insert_text",
+  "restore_version",
+  "restore_fragment",
+  "undo",
+  "redo",
+]);
+
+/** Fail if any document-mutating action was returned (used by the clarify case). */
+function ensureNoMutation(actions: Action[]): void {
+  const mutating = actions.filter((a) => MUTATING_ACTIONS.has(a.type));
+  ensure(
+    mutating.length === 0,
+    `expected NO mutating action, but got: [${mutating.map((a) => a.type).join(", ")}]`,
+  );
+}
+
 // -- context assembly ----------------------------------------------------------
 
 // A fixed timestamp keeps the assembled context (and thus the prompt) stable
@@ -132,15 +152,24 @@ export const cases: EvalCase[] = [
     },
   },
   {
-    name: "dictation is appended to the document as insert_text",
+    name: "dictation is appended to the document as insert_text carrying the transcript text",
     docText: "Dear team,",
     transcript: "New line: Thanks for all your hard work this quarter.",
     assert: ({ actions }) => {
       const ins = pick(actions, "insert_text");
       ensure(ins.text.trim().length > 0, "insert_text must carry the dictated text");
+      // Promise in the title: the inserted text is the ACTUAL dictated sentence, not
+      // just some non-empty string. Require the substantive phrase, both anchors --
+      // "hard work" AND "quarter" -- so a stray/hallucinated insert can't pass.
       ensure(
-        has(ins.text, "hard work") || has(ins.text, "thanks") || has(ins.text, "quarter"),
-        `insert_text should contain the dictation; got "${ins.text}"`,
+        has(ins.text, "hard work") && has(ins.text, "quarter"),
+        `insert_text should contain the dictated sentence ("...hard work this quarter"); got "${ins.text}"`,
+      );
+      // The "New line:" framing is a command, not literal content -- it must not be
+      // dictated verbatim into the document.
+      ensure(
+        !has(ins.text, "new line:"),
+        `insert_text must not echo the "New line:" command literally; got "${ins.text}"`,
       );
       // Appending: a plain-string position must be "end", never "start".
       if (typeof ins.position === "string") {
@@ -215,12 +244,15 @@ export const cases: EvalCase[] = [
     },
   },
   {
-    name: "an ambiguous request yields a clarify instead of a guess",
+    name: "an ambiguous request yields a clarify AND no mutating action (no guessed edit)",
     docText: "We should consider the proposal.\nIt has some merit but also risks.",
     transcript: "Fix it.",
     assert: ({ actions }) => {
       const clarify = pick(actions, "clarify");
       ensure(clarify.question.trim().length > 0, "clarify must ask a real question");
+      // Promise in the title: clarifying INSTEAD OF guessing means the model must not
+      // also fire off a speculative edit/insert/restore/undo on the ambiguous request.
+      ensureNoMutation(actions);
     },
   },
   {

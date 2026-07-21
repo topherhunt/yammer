@@ -1,8 +1,5 @@
 import { defineConfig } from "vitest/config";
 
-export default defineConfig({
-  test: {
-    include: ["packages/**/*.test.ts", "apps/**/*.test.ts"],
-    environment: "node",
-  },
-});
+// Projects + environments are defined in vitest.workspace.ts so `pnpm test`
+// runs each package under the right environment (node vs jsdom).
+export default defineConfig({});

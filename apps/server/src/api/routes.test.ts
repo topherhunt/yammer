@@ -297,6 +297,39 @@ describe("POST /api/turn (thin relay)", () => {
     expect(await repos.turns.listForDocument(user.id, doc.id)).toHaveLength(0);
   });
 
+  it("rejects a malformed context ({}) with 400 -- before any LLM call, not a 500", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    // Drained: if the handler reached the provider it would 502, not 400. A 400 here
+    // proves validation short-circuits before any (paid) LLM call.
+    const app = buildApp({ repos, llm: new FakeLlm([]), search: new FakeSearch() });
+
+    const res = await app.request("/api/turn", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ transcript: "hello", context: {}, documentId: doc.id }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/SituationalContext/);
+    // No diagnostic Turn logged for a request that never ran.
+    expect(await repos.turns.listForDocument(user.id, doc.id)).toHaveLength(0);
+  });
+
+  it("rejects a missing transcript with 400", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm([]), search: new FakeSearch() });
+
+    const res = await app.request("/api/turn", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ context: contextForDoc(doc), documentId: doc.id }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("does not log a diagnostic Turn for a document the caller does not own", async () => {
     const { repos } = createTestDb();
     const alice = await seedUser(repos);
@@ -421,6 +454,53 @@ describe("POST /api/documents/:id/versions (client-authoritative persistence)", 
 
     // Head is unchanged: only seq 0 and the first appended seq 1 survive.
     expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
+  });
+
+  it("rejects a malformed version envelope with 400, persisting nothing", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    // Only id/seq/documentId present -- the old code cast the rest straight to
+    // Version and would 500 or persist an inconsistent snapshot. versionSchema now
+    // rejects it as a clean 400.
+    const res = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: { id: "v-bad", seq: 1, documentId: doc.id } }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/invalid version/);
+
+    // Nothing was persisted: only the seq-0 create survives, head unmoved.
+    expect(
+      (await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq),
+    ).toEqual([0]);
+    expect(await repos.versions.get(user.id, "v-bad")).toBeNull();
+  });
+
+  it("rejects a version with a null fullText (the NULL-column 500) with 400", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const res = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({
+        version: editVersion({
+          documentId: doc.id,
+          seq: 1,
+          fullText: null as unknown as string,
+        }),
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(
+      (await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq),
+    ).toEqual([0]);
   });
 
   it("returns 404 when persisting to another user's document", async () => {

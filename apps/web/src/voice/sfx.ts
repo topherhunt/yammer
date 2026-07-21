@@ -37,6 +37,17 @@ export class WebAudioSfx implements Sfx {
   private ctx: AudioContext | null = null;
   private readonly buffers = new Map<SfxSound, AudioBuffer>();
 
+  /** Create + resume the AudioContext SYNCHRONOUSLY, called from inside the
+   * tap-to-start gesture before any await. On iOS Safari an AudioContext created
+   * after an await (past the gesture window) can start `suspended` -- silent SFX
+   * and a dead worklet -- so the gesture itself must create and resume it. */
+  unlock(): void {
+    const Ctor = audioContextCtor();
+    if (!Ctor) return; // headless / unsupported -- SFX is non-essential
+    if (!this.ctx) this.ctx = new Ctor();
+    if (this.ctx.state === "suspended") void this.ctx.resume();
+  }
+
   async preload(): Promise<void> {
     const Ctor = audioContextCtor();
     if (!Ctor) return; // headless / unsupported -- SFX is non-essential
@@ -46,8 +57,8 @@ export class WebAudioSfx implements Sfx {
         this.buffers.set(sound, this.render(this.ctx, TONES[sound]));
       }
     }
-    // A user gesture already unlocked audio (the tap-to-start gate), but resume
-    // defensively in case the context started suspended.
+    // A user gesture already unlocked audio (the tap-to-start gate via unlock()),
+    // but resume defensively in case the context started suspended.
     if (this.ctx.state === "suspended") await this.ctx.resume();
   }
 

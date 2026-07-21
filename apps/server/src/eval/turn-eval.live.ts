@@ -23,6 +23,7 @@ import {
   DEFAULT_MODEL,
   costOf,
   defaultLedgerPath,
+  parseBudgetUsd,
 } from "./cost";
 
 const live = process.env.YAMMER_LIVE === "1" && !!process.env.OPENAI_API_KEY;
@@ -37,7 +38,8 @@ if (!live) {
 }
 
 const model = process.env.LLM_EVAL_MODEL ?? DEFAULT_MODEL;
-const budgetUsd = Number(process.env.YAMMER_LIVE_BUDGET_USD ?? "0.50");
+// NOTE: the budget cap is parsed INSIDE the live branch (see beforeAll below), never
+// at module scope, so a bad YAMMER_LIVE_BUDGET_USD can't crash the free skip path.
 
 // Conservative pre-call token ceilings: ~3 chars/token (English averages ~4, so
 // this over-counts input tokens) and a generous output ceiling for a structured
@@ -48,12 +50,17 @@ const CONSERVATIVE_OUTPUT_TOKENS = 600;
 const suite = live ? describe : describe.skip;
 
 suite("live LLM turn eval on the golden instruction cases", () => {
-  const accountant = new CostAccountant(budgetUsd);
+  let accountant: CostAccountant;
+  let budgetUsd: number;
   let provider: LlmProvider;
   let aborted = false;
 
   beforeAll(() => {
-    // Only reached when the suite actually runs (live === true), so the key is present.
+    // Only reached when the suite actually runs (live === true), so the key is
+    // present. Parsing the budget HERE (not at module scope) keeps the describe.skip
+    // path free and crash-proof even when YAMMER_LIVE_BUDGET_USD is malformed.
+    budgetUsd = parseBudgetUsd(process.env.YAMMER_LIVE_BUDGET_USD);
+    accountant = new CostAccountant(budgetUsd);
     provider = createLlmProvider({ apiKey: process.env.OPENAI_API_KEY!, model });
   });
 
@@ -92,6 +99,10 @@ suite("live LLM turn eval on the golden instruction cases", () => {
         system,
         model,
         messages: [{ role: "user", content: userMessage }],
+        // Enforce the SAME conservative output ceiling used in the projection above,
+        // so actual output cannot exceed what was budgeted -- a single case can no
+        // longer run to the model default max and overshoot the hard cap.
+        maxTokens: CONSERVATIVE_OUTPUT_TOKENS,
       });
 
       // Meter the ACTUAL spend against the cap (throws if it somehow breaches).
@@ -122,6 +133,8 @@ suite("live LLM turn eval on the golden instruction cases", () => {
   }
 
   afterAll(() => {
+    // The skip path never constructs the accountant; guard so it never touches it.
+    if (!live) return;
     const total = accountant.total();
     const count = accountant.count();
     const avg = count > 0 ? total / count : 0;

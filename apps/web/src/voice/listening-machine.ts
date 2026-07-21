@@ -50,6 +50,7 @@ export type ListeningEvent =
   | { type: "INTERIM"; text: string } // live partial transcript
   | { type: "FINAL"; text: string; seconds: number } // endpointed STT segment
   | { type: "GRACE_ELAPSED" } // the driver's grace timer fired
+  | { type: "FINALIZE_TIMEOUT" } // no STT final landed while finalizing
   | { type: "HIDDEN" } // page backgrounded
   | { type: "VISIBLE" }; // page foregrounded
 
@@ -60,8 +61,16 @@ export type ListeningCommand =
   | { type: "STOP_WAKEWORD" }
   | { type: "SCHEDULE_GRACE" }
   | { type: "CANCEL_GRACE" }
+  | { type: "SCHEDULE_FINALIZE" }
+  | { type: "CANCEL_FINALIZE" }
   | { type: "SUBMIT"; text: string; seconds: number }
+  | { type: "NOTIFY_ERROR"; message: string }
   | { type: "PLAY_SFX"; sound: SfxSound };
+
+/** Surfaced when the STT FINAL never lands while finalizing (e.g. a dropped
+ * socket). The mic stays on -- the user can simply speak again. */
+export const FINALIZE_TIMEOUT_MESSAGE =
+  "Speech recognition did not finish -- the microphone is still on, please try again.";
 
 export interface Transition {
   state: ListeningState;
@@ -105,6 +114,9 @@ function toStopped(state: ListeningState, mode: "paused" | "muted"): Transition 
   const commands: ListeningCommand[] = [{ type: "STOP_CAPTURE" }];
   if (state.mode === "listening" && state.phase === "grace") {
     commands.push({ type: "CANCEL_GRACE" });
+  }
+  if (state.mode === "listening" && state.phase === "finalizing") {
+    commands.push({ type: "CANCEL_FINALIZE" });
   }
   if (mode === "paused") commands.push({ type: "START_WAKEWORD" });
   else commands.push({ type: "STOP_WAKEWORD" });
@@ -157,7 +169,14 @@ export function reduceListening(
           commands: [{ type: "CANCEL_GRACE" }],
         };
       }
-      if (state.phase === "silent" || state.phase === "finalizing") {
+      if (state.phase === "finalizing") {
+        // Resumed before the final landed: cancel the finalize timeout too.
+        return {
+          state: { ...state, phase: "speaking" },
+          commands: [{ type: "CANCEL_FINALIZE" }],
+        };
+      }
+      if (state.phase === "silent") {
         return { state: { ...state, phase: "speaking" }, commands: [] };
       }
       return none; // already speaking
@@ -166,7 +185,11 @@ export function reduceListening(
     case "SPEECH_END": {
       if (state.mode !== "listening" || state.phase !== "speaking") return none;
       // Await the STT final for this segment before starting the grace window.
-      return { state: { ...state, phase: "finalizing" }, commands: [] };
+      // Arm a finalize timeout so a dropped socket can't hang us here forever.
+      return {
+        state: { ...state, phase: "finalizing" },
+        commands: [{ type: "SCHEDULE_FINALIZE" }],
+      };
     }
 
     case "INTERIM":
@@ -182,8 +205,25 @@ export function reduceListening(
       // next SPEECH_START's CANCEL_GRACE, so we never send mid-utterance.
       return {
         state: { ...state, phase: "grace", pending },
-        commands: [{ type: "SCHEDULE_GRACE" }],
+        commands: [{ type: "CANCEL_FINALIZE" }, { type: "SCHEDULE_GRACE" }],
       };
+    }
+
+    case "FINALIZE_TIMEOUT": {
+      // The STT final never arrived (e.g. a dropped socket). Leave `finalizing`
+      // to a visible retryable state instead of hanging: flush any buffered text
+      // and surface the failure. The mic stays on, so the user can just re-speak.
+      if (state.mode !== "listening" || state.phase !== "finalizing") return none;
+      const commands: ListeningCommand[] = [];
+      if (state.pending) {
+        commands.push({
+          type: "SUBMIT",
+          text: state.pending.text,
+          seconds: state.pending.seconds,
+        });
+      }
+      commands.push({ type: "NOTIFY_ERROR", message: FINALIZE_TIMEOUT_MESSAGE });
+      return { state: { ...state, phase: "silent", pending: null }, commands };
     }
 
     case "GRACE_ELAPSED": {
@@ -205,6 +245,16 @@ export function reduceListening(
       if (state.mode === "listening") {
         const commands: ListeningCommand[] = [{ type: "STOP_CAPTURE" }];
         if (state.phase === "grace") commands.push({ type: "CANCEL_GRACE" });
+        if (state.phase === "finalizing") commands.push({ type: "CANCEL_FINALIZE" });
+        // An involuntary background must not discard a just-finished thought: if a
+        // completed utterance is buffered, submit it rather than drop it.
+        if (state.pending) {
+          commands.push({
+            type: "SUBMIT",
+            text: state.pending.text,
+            seconds: state.pending.seconds,
+          });
+        }
         return {
           state: { mode: "listening", phase: "silent", suspended: true, pending: null },
           commands,

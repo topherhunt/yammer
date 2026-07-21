@@ -51,15 +51,24 @@ export function getDefaultStore(): StoreApi<AppStore> {
       stt: new MockStt(), // inert here; the VoiceController owns real capture
       sfx: {
         preload: async () => {},
+        // Forward the in-gesture AudioContext unlock (item 6) to the real Sfx.
+        unlock: () => voiceSfx?.unlock(),
         play: (sound: SfxSound) => voiceSfx?.play(sound),
       },
       onSetListening: (state: ListeningState) => voice?.setListening(state),
+      // Confirmed-capture tap-to-start: resolves once the mic is live, rejects on
+      // a permission denial. Only reachable once voiceReady, so `voice` is set.
+      startCapture: () => voice?.start() ?? Promise.resolve(),
+      // The voice pipeline is a late-bound dynamic import; it is not ready until
+      // that import resolves. An early tap is queued (see startMic) and runs then.
+      voiceReady: false,
     });
     singleton = store;
     void import("../voice/create-voice").then(({ createVoice }) => {
       const created = createVoice(store, apiBase);
       voice = created.controller;
       voiceSfx = created.sfx;
+      store.getState().setVoiceReady(true);
     });
     return singleton;
   }

@@ -46,7 +46,16 @@ export interface TestContext {
   repos: Repos;
 }
 
-export function createTestDb(): TestContext {
+export interface CreateTestDbOptions {
+  /**
+   * Optional fault injector for atomicity tests: return true for the substituted
+   * SQL of a statement that should throw instead of executing. Lets a test fail the
+   * SECOND write of a transactional pair and assert the FIRST rolled back too.
+   */
+  failOn?: (sql: string) => boolean;
+}
+
+export function createTestDb(opts: CreateTestDbOptions = {}): TestContext {
   const mem = newDb();
   mem.public.none(INIT_SQL);
 
@@ -55,6 +64,9 @@ export function createTestDb(): TestContext {
       const substituted = sqlText.replace(/\$(\d+)/g, (_m, d: string) =>
         toLiteral(params[Number(d) - 1]),
       );
+      if (opts.failOn?.(substituted)) {
+        throw new Error(`injected write fault for: ${substituted}`);
+      }
       const res = mem.public.query(substituted) as {
         rows: Record<string, unknown>[];
         fields?: { name: string }[];
@@ -66,8 +78,27 @@ export function createTestDb(): TestContext {
     { schema },
   );
 
+  // The pg-proxy driver has no connection to BEGIN on, so its db.transaction()
+  // throws -- but the repos rely on it for write atomicity. Back it with pg-mem's
+  // snapshot/restore: take a backup before the callback and, on any throw, restore
+  // it, giving the tests genuine all-or-nothing rollback. The repos never nest
+  // transactions, so a single-level backup/restore is sufficient. The callback
+  // receives `db` itself as the "tx" (same drizzle instance -> same pg-mem engine),
+  // which is why repo queries run against the same in-memory state.
+  (db as unknown as { transaction: TransactionFn }).transaction = async (cb) => {
+    const backup = mem.backup();
+    try {
+      return await cb(db);
+    } catch (err) {
+      backup.restore();
+      throw err;
+    }
+  };
+
   return { db, repos: createRepos(db) };
 }
+
+type TransactionFn = <T>(cb: (tx: Database) => Promise<T>) => Promise<T>;
 
 /** Insert a user directly and return it. Each call gets a distinct googleSub. */
 export async function seedUser(

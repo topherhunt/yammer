@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { DialogKind, ListeningState, Panel } from "./state";
 
 // The situational context payload the context assembler builds from AppState
@@ -25,3 +26,45 @@ export interface SituationalContext {
   /** Compacted summary of edit history (not every diff). */
   historySummary: string;
 }
+
+/**
+ * Zod schema mirroring SituationalContext, kept in lockstep with the interface
+ * above. The server validates the client-supplied `context` on POST /api/turn with
+ * this so a malformed body (e.g. `{}`, missing `recentChat`) is a clean 400 rather
+ * than a 500 when the prompt renderer dereferences `recentChat.length`.
+ */
+export const situationalContextSchema = z.object({
+  document: z
+    .object({
+      name: z.string(),
+      lineCount: z.number(),
+      numberedText: z.string(),
+    })
+    .nullable(),
+  visible: z
+    .object({ firstLine: z.number(), lastLine: z.number() })
+    .nullable(),
+  openDialog: z
+    .object({
+      kind: z.enum(["menu", "help", "load", "history"]),
+      contents: z.string(),
+    })
+    .nullable(),
+  activePanel: z.enum(["chat", "document"]),
+  listening: z.enum(["listening", "paused", "muted"]),
+  chatSummary: z.string(),
+  recentChat: z.array(z.object({ role: z.string(), text: z.string() })),
+  historySummary: z.string(),
+});
+
+// Compile-time guard that schema and interface stay consistent in both directions
+// (the constraints fail the build if either side drifts).
+type AssertExtends<A extends B, B> = true;
+type _CtxFwd = AssertExtends<
+  z.infer<typeof situationalContextSchema>,
+  SituationalContext
+>;
+type _CtxBwd = AssertExtends<
+  SituationalContext,
+  z.infer<typeof situationalContextSchema>
+>;

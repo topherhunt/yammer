@@ -145,6 +145,10 @@ export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
         model: req.model || config.model,
         instructions: req.system,
         input: req.messages.map((m) => ({ role: m.role, content: m.content })),
+        // Cap output tokens when the caller sets a ceiling (the eval budget
+        // harness does), so the most expensive dimension can't run to the model
+        // default. Omitted entirely when unset -- the model's default applies.
+        ...(req.maxTokens !== undefined ? { max_output_tokens: req.maxTokens } : {}),
         text: {
           format: {
             type: "json_schema",

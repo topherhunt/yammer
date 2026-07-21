@@ -37,6 +37,27 @@ export const PRICING: Record<string, Pricing> = {
 /** The dev-default model id -- also the model the "default" pricing row mirrors. */
 export const DEFAULT_MODEL = "gpt-5.6-luna";
 
+/** Hard budget cap used when YAMMER_LIVE_BUDGET_USD is unset/empty. */
+export const DEFAULT_BUDGET_USD = 0.5;
+
+/**
+ * Parse + validate the live-eval budget cap from its env string. Fails loudly on a
+ * present-but-invalid value (NaN, non-positive) instead of silently proceeding with
+ * a bad cap that would later crash CostAccountant. Falls back to DEFAULT_BUDGET_USD
+ * when unset/empty. Kept here (not at eval module scope) so the eval's skip path can
+ * defer calling it -- a bad env value must never crash the no-spend describe.skip.
+ */
+export function parseBudgetUsd(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return DEFAULT_BUDGET_USD;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(
+      `Invalid YAMMER_LIVE_BUDGET_USD: expected a positive USD amount, got "${raw}"`,
+    );
+  }
+  return value;
+}
+
 /** Rates for `model`, falling back to the documented `default` row for unknown ids. */
 export function pricingFor(model: string): Pricing {
   return PRICING[model] ?? PRICING.default!;

@@ -40,5 +40,9 @@ export interface WakeWordDetector {
 export interface Sfx {
   /** Preload buffers so playback has no first-hit lag. Safe to call repeatedly. */
   preload(): Promise<void>;
+  /** Synchronously create + resume the shared AudioContext inside the tap-to-start
+   * gesture, BEFORE any await, so iOS Safari does not leave it suspended (which
+   * yields a silent first SFX / no worklet). Safe to call repeatedly. */
+  unlock(): void;
   play(sound: SfxSound): void;
 }

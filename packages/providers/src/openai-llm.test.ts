@@ -174,6 +174,21 @@ describe("createLlmProvider", () => {
     });
   });
 
+  it("passes maxTokens through as max_output_tokens, and omits it when unset", async () => {
+    createMock.mockResolvedValue({
+      output_text: JSON.stringify({ actions: [] }),
+      usage: { input_tokens: 1, output_tokens: 1, input_tokens_details: { cached_tokens: 0 } },
+    });
+    const provider = createLlmProvider({ apiKey: "k", model: "gpt-5.6-luna" });
+
+    await provider.complete({ system: "s", messages: [], model: "gpt-5.6-luna", maxTokens: 600 });
+    expect(createMock.mock.calls[0]![0].max_output_tokens).toBe(600);
+
+    // A request without a ceiling must not pin max_output_tokens at all.
+    await provider.complete({ system: "s", messages: [], model: "gpt-5.6-luna" });
+    expect(createMock.mock.calls[1]![0]).not.toHaveProperty("max_output_tokens");
+  });
+
   it("falls back to the config model when the request omits one", async () => {
     createMock.mockResolvedValue({
       output_text: JSON.stringify({ actions: [] }),

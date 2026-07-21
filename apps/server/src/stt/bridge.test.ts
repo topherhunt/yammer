@@ -337,6 +337,48 @@ describe("createSttBridge -- teardown + protocol", () => {
   });
 });
 
+describe("createSttBridge -- start control validation (spend-meter safety)", () => {
+  it("rejects a start whose sampleRate is non-numeric: error + close, NO upstream opened", () => {
+    const h = harness();
+    // {"sampleRate":"fast"} would set sampleRate = NaN and meter NaN audio-seconds,
+    // corrupting the per-document spend meter -- so it must be refused up front.
+    h.bridge.onClientMessage(JSON.stringify({ type: "start", sampleRate: "fast" }), false);
+    expect(h.client.received).toEqual([
+      { type: "error", message: "invalid control message" },
+      { type: "closed", reason: "server_error" },
+    ]);
+    expect(h.openedUpstream()).toBe(false);
+    expect(h.client.isClosed()).toBe(true);
+  });
+
+  it("rejects a start with an absent sampleRate the same way, opening no upstream", () => {
+    const h = harness();
+    h.bridge.onClientMessage(JSON.stringify({ type: "start" }), false);
+    expect(h.client.received).toEqual([
+      { type: "error", message: "invalid control message" },
+      { type: "closed", reason: "server_error" },
+    ]);
+    expect(h.openedUpstream()).toBe(false);
+  });
+
+  it("rejects a start with a non-positive sampleRate (0), opening no upstream", () => {
+    const h = harness();
+    h.bridge.onClientMessage(JSON.stringify({ type: "start", sampleRate: 0 }), false);
+    expect(h.client.received).toEqual([
+      { type: "error", message: "invalid control message" },
+      { type: "closed", reason: "server_error" },
+    ]);
+    expect(h.openedUpstream()).toBe(false);
+  });
+
+  it("accepts a well-formed start (valid numeric sampleRate) and opens the upstream", () => {
+    const h = harness();
+    h.bridge.onClientMessage(JSON.stringify({ type: "start", sampleRate: 24_000 }), false);
+    expect(h.openedUpstream()).toBe(true);
+    expect(h.openParams()).toEqual({ sampleRate: 24_000, latency: undefined });
+  });
+});
+
 describe("parseUpstreamEvent", () => {
   it("maps delta events to interim, completed to final, errors to error, else ignore", () => {
     expect(

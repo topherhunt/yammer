@@ -55,15 +55,28 @@ export interface AppStore {
    * the turn loop owns for the LLM "sending" phase. */
   listeningPhase: "idle" | "finalizing";
   /** Whether the tap-to-start gate has been dismissed and the mic granted. An
-   * edge/session flag, not persisted domain state. */
+   * edge/session flag, not persisted domain state. Only set true once capture is
+   * CONFIRMED, so the gate never dismisses on an optimistic (unconfirmed) start. */
   micStarted: boolean;
+  /** Whether the voice pipeline (the late-bound dynamic import) is wired and ready
+   * to accept a start. An early tap before this is true is queued, not lost. */
+  voiceReady: boolean;
+  /** True while a tap-to-start is queued waiting on `voiceReady` (drives the gate
+   * button's busy/label state). */
+  startQueued: boolean;
   lastError: string | null;
   scrollCommand: ScrollCommand | null;
 
   /** Tap-to-start gate: dismiss the gate and begin listening. Must run inside a
-   * user gesture so the mic-permission request the set_listening effect triggers
-   * is allowed by the browser. */
+   * user gesture so the mic-permission request is allowed by the browser. If the
+   * voice pipeline is not yet ready the tap is queued and runs on ready. */
   startMic: () => void;
+  /** Mark the (late-bound) voice pipeline ready; runs any queued tap-to-start. */
+  setVoiceReady: (ready: boolean) => void;
+  /** Push a voice-pipeline error (STT/mic/reconnect/finalize) into the chat error
+   * log so it is shown and announced (role=status/aria-live). The public
+   * voice-error channel the voice pipeline routes its failures through. */
+  pushVoiceError: (message: string) => void;
   /** Push the voice pipeline's derived indicator signals into the view. */
   setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
   /** Apply one action from a UI control (default author "user"). */
@@ -100,6 +113,17 @@ export interface StoreDeps {
   /** Routes the set_listening effect to the voice pipeline's listening machine.
    * When omitted the store just drives the injected SttProvider (Phase 3). */
   onSetListening?: (state: ListeningState) => void;
+  /** Confirmed-capture tap-to-start: resolves once the mic is actually live and
+   * rejects on a permission denial. When provided, startMic waits for it before
+   * entering the listening state (so a denial never shows a lying "Listening").
+   * When omitted the store falls back to the optimistic Phase-3 behavior. */
+  startCapture?: () => Promise<void>;
+  /** Whether the voice pipeline is ready at construction. The real app defers it
+   * (false) until the dynamic voice import resolves; tests/mocks default ready. */
+  voiceReady?: boolean;
+  /** Delay before re-attempting a persist drain that paused on exhausted retries
+   * (ms). Overridable so tests can drop the wait. */
+  reDrainDelayMs?: number;
 }
 
 export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
@@ -107,6 +131,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
   const newId = deps.newId ?? (() => `id-${++idCounter}`);
   const now = deps.now ?? (() => new Date().toISOString());
   let scrollNonce = 0;
+  /** A tap-to-start that arrived before the voice pipeline was ready; run on
+   * setVoiceReady(true) so an early tap is never a lost no-op. */
+  let queuedStart = false;
 
   const MAX_PERSIST_TRIES = 3;
   const retryDelayMs = deps.retryDelayMs ?? ((attempt) => 200 * 2 ** attempt);
@@ -162,15 +189,44 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     const persistQueue: PersistItem[] = [];
     let draining = false;
     let drainPromise: Promise<void> = Promise.resolve();
+    let reDrainHandle: ReturnType<typeof setTimeout> | null = null;
+    const reDrainDelayMs = deps.reDrainDelayMs ?? 5000;
+
+    /** Start draining if there is queued work and no drain is in flight. Safe to
+     * call from anywhere (enqueue, the re-drain timer, the `online` event). */
+    function kickDrain(): void {
+      if (draining || persistQueue.length === 0) return;
+      draining = true;
+      drainPromise = drainPersistQueue().finally(() => {
+        draining = false;
+      });
+    }
+
+    /** After retries are exhausted the head item stays queued but nothing is
+     * in flight, so schedule a delayed retry -- otherwise the last edit may never
+     * persist unless the user makes another edit. Coalesced to one pending timer;
+     * the `online` event resumes immediately (below). */
+    function scheduleReDrain(): void {
+      if (reDrainHandle !== null || persistQueue.length === 0) return;
+      reDrainHandle = setTimeout(() => {
+        reDrainHandle = null;
+        kickDrain();
+      }, reDrainDelayMs);
+    }
 
     function enqueuePersist(version: Version, undo: PersistUndo): void {
       persistQueue.push({ version, undo });
-      if (!draining) {
-        draining = true;
-        drainPromise = drainPersistQueue().finally(() => {
-          draining = false;
-        });
-      }
+      kickDrain();
+    }
+
+    // Resume a paused persist queue the instant connectivity returns, so an edit
+    // stranded by an offline blip persists without waiting on the re-drain timer
+    // or another user action.
+    if (
+      typeof window !== "undefined" &&
+      typeof window.addEventListener === "function"
+    ) {
+      window.addEventListener("online", () => kickDrain());
     }
 
     async function attemptPersist(
@@ -197,19 +253,27 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           continue;
         }
         if (outcome === "conflict") {
-          // The server head advanced elsewhere. Everything queued was built on a
-          // now-stale base, so drop the local queue and reload rather than
-          // replaying into a cascade of 409s.
-          persistQueue.length = 0;
-          await reconcile(item.version.documentId);
-          return;
+          // The server head advanced elsewhere for THIS document. Only edits for
+          // the conflicting document are built on a now-stale base -- drop just
+          // those and reconcile; pending edits for other documents the user
+          // switched away from must not be silently dropped.
+          const conflictedDoc = item.version.documentId;
+          for (let i = persistQueue.length - 1; i >= 0; i--) {
+            if (persistQueue[i]!.version.documentId === conflictedDoc) {
+              persistQueue.splice(i, 1);
+            }
+          }
+          await reconcile(conflictedDoc);
+          continue; // keep draining any surviving other-document edits
         }
         // Transient failure survived every retry. PAUSE at the head (never drop
-        // the edit) and surface it; the next persist resumes the drain, retrying
-        // this same version first, so ordering and the user's work are preserved.
+        // the edit) and surface it, then schedule a delayed re-drain (and the
+        // `online` event resumes immediately) so the edit is retried even without
+        // another user action. Ordering and the user's work are preserved.
         surfaceError(
           `Could not save your last edit to the server after ${MAX_PERSIST_TRIES} attempts. Your work is kept and will retry -- please check your connection.`,
         );
+        scheduleReDrain();
         return;
       }
     }
@@ -531,12 +595,61 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       sttPhase: "idle",
       listeningPhase: "idle",
       micStarted: false,
+      voiceReady: deps.voiceReady ?? true,
+      startQueued: false,
       lastError: null,
       scrollCommand: null,
 
       startMic() {
-        set({ micStarted: true });
-        get().dispatch({ type: "set_listening", state: "listening" });
+        // The click IS the user gesture: create + resume the shared AudioContext
+        // synchronously here (before any await), so iOS Safari does not leave it
+        // suspended -- otherwise the first SFX is silent and the worklet dead.
+        deps.sfx?.unlock();
+
+        // Early-tap race: the voice pipeline is late-bound (dynamic import). If it
+        // is not ready yet, remember the tap and run it on ready rather than
+        // dropping it as a no-op.
+        if (!get().voiceReady) {
+          queuedStart = true;
+          set({ startQueued: true });
+          return;
+        }
+
+        if (!deps.startCapture) {
+          // Phase-3 / no real capture seam: optimistic start (existing behavior).
+          set({ micStarted: true, startQueued: false });
+          get().dispatch({ type: "set_listening", state: "listening" });
+          return;
+        }
+
+        // Confirmed-capture path: do NOT enter the listening state until the mic
+        // is actually live. On a getUserMedia/permission denial, surface a clear
+        // error and stay in the gate so the user can retry.
+        set({ startQueued: false });
+        void deps
+          .startCapture()
+          .then(() => {
+            set({ micStarted: true });
+            get().dispatch({ type: "set_listening", state: "listening" });
+          })
+          .catch((err) => {
+            surfaceError(
+              `Microphone access failed: ${errMessage(err)}. Please allow the microphone and tap to try again.`,
+            );
+          });
+      },
+
+      setVoiceReady(ready) {
+        set({ voiceReady: ready });
+        if (ready && queuedStart) {
+          queuedStart = false;
+          set({ startQueued: false });
+          get().startMic();
+        }
+      },
+
+      pushVoiceError(message) {
+        surfaceError(message);
       },
 
       setVoiceIndicator({ vad, finalizing }) {

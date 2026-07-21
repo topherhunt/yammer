@@ -26,6 +26,13 @@ export interface LlmRequest {
   system: string;
   messages: LlmMessage[];
   model: string;
+  /**
+   * Hard ceiling on output tokens for this call (maps to OpenAI
+   * `max_output_tokens`). Lets a caller cap the most expensive dimension of a
+   * request -- the live-eval budget harness passes the same conservative output
+   * ceiling it projects, so a single case can never overshoot the cost cap.
+   */
+  maxTokens?: number;
 }
 
 export interface LlmResult {

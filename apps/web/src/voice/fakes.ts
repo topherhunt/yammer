@@ -85,10 +85,14 @@ export class FakeWakeWord implements WakeWordDetector {
 
 export class FakeSfx implements Sfx {
   preloaded = false;
+  unlocked = 0;
   readonly played: SfxSound[] = [];
 
   async preload(): Promise<void> {
     this.preloaded = true;
+  }
+  unlock(): void {
+    this.unlocked += 1;
   }
   play(sound: SfxSound): void {
     this.played.push(sound);
@@ -100,6 +104,9 @@ export class FakeSfx implements Sfx {
 export class FakeSttSource implements SttSource {
   started = 0;
   stopped = 0;
+  /** When set, start() returns a rejected promise, standing in for a denied
+   * getUserMedia / mic-permission failure. */
+  startError: Error | null = null;
   private vadCbs: Array<(speaking: boolean) => void> = [];
   private interimCbs: Array<(text: string) => void> = [];
   private finalCbs: Array<(text: string, seconds: number) => void> = [];
@@ -108,8 +115,9 @@ export class FakeSttSource implements SttSource {
     return this.started > this.stopped;
   }
 
-  start(): void {
+  start(): void | Promise<void> {
     this.started += 1;
+    if (this.startError) return Promise.reject(this.startError);
   }
   stop(): void {
     this.stopped += 1;

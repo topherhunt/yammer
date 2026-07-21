@@ -14,11 +14,11 @@
 // per-user concurrency) -- each closing BOTH sockets with the matching close reason.
 
 import type {
-  SttClientMessage,
   SttCloseReason,
   SttLatency,
   SttServerMessage,
 } from "@yammer/shared";
+import { sttClientMessageSchema } from "@yammer/shared";
 
 /** The server-side connection to OpenAI realtime transcription. */
 export interface SttUpstream {
@@ -233,14 +233,26 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
 
   const handleControl = (data: unknown) => {
     const text = toText(data);
-    let message: SttClientMessage;
+    let raw: unknown;
     try {
-      message = JSON.parse(text) as SttClientMessage;
+      raw = JSON.parse(text);
     } catch {
       send({ type: "error", message: "malformed control message" });
       closeBoth("server_error");
       return;
     }
+
+    // Validate the control message BEFORE trusting any field. An unchecked
+    // sampleRate (e.g. {"sampleRate":"fast"} -> NaN) would corrupt audio-seconds
+    // metering and thus the spend meter, so a malformed/absent sampleRate is
+    // rejected here with a clear error and no upstream is ever opened.
+    const parsed = sttClientMessageSchema.safeParse(raw);
+    if (!parsed.success) {
+      send({ type: "error", message: "invalid control message" });
+      closeBoth("server_error");
+      return;
+    }
+    const message = parsed.data;
 
     if (message.type === "start") {
       if (started) return; // a second start is a no-op; the first one owns the session
@@ -260,13 +272,8 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
       return;
     }
 
-    if (message.type === "stop") {
-      closeBoth("done");
-      return;
-    }
-
-    send({ type: "error", message: "unknown control message" });
-    closeBoth("server_error");
+    // The discriminated-union schema guarantees the only remaining case is `stop`.
+    closeBoth("done");
   };
 
   const handleAudio = (data: unknown) => {

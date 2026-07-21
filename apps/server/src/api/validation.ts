@@ -2,6 +2,19 @@
 // @yammer/core's parseLlmResponse; these schemas cover the plain REST bodies.
 
 import { z } from "zod";
+import { situationalContextSchema } from "@yammer/shared";
+
+// POST /api/turn body. The prompt renderer dereferences context.recentChat (and
+// other fields) unconditionally, so a malformed context ({}) would 500; validating
+// the whole request here turns that into a clean 400. `sttMeta` is opaque diagnostic
+// metadata (provider/interim flags) recorded verbatim, so it stays unknown.
+export const turnRequestSchema = z.object({
+  transcript: z.string(),
+  context: situationalContextSchema,
+  documentId: z.string().optional(),
+  sttSeconds: z.number().optional(),
+  sttMeta: z.unknown().optional(),
+});
 
 export const settingsSchema = z.object({
   theme: z.enum(["system", "light", "dark"]),

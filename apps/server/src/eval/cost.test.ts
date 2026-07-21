@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Usage } from "@yammer/shared";
 
-import { CostAccountant, costOf, pricingFor } from "./cost";
+import {
+  CostAccountant,
+  DEFAULT_BUDGET_USD,
+  costOf,
+  parseBudgetUsd,
+  pricingFor,
+} from "./cost";
 
 // A Usage where inputTokens (1000) INCLUDES the cached subset (400), matching the
 // provider mapping the cost math is aligned to.
@@ -41,6 +47,28 @@ describe("costOf", () => {
   it("falls back to the documented default pricing for an unknown model id", () => {
     expect(costOf(usage, "totally-made-up")).toBe(costOf(usage, "gpt-5.6-luna"));
     expect(pricingFor("totally-made-up")).toEqual(pricingFor("gpt-5.6-luna"));
+  });
+});
+
+describe("parseBudgetUsd (skip-path safety)", () => {
+  it("falls back to the default cap when unset or empty", () => {
+    expect(parseBudgetUsd(undefined)).toBe(DEFAULT_BUDGET_USD);
+    expect(parseBudgetUsd("")).toBe(DEFAULT_BUDGET_USD);
+    expect(DEFAULT_BUDGET_USD).toBe(0.5);
+  });
+
+  it("parses a valid positive amount", () => {
+    expect(parseBudgetUsd("0.25")).toBe(0.25);
+    expect(parseBudgetUsd("2")).toBe(2);
+  });
+
+  it("fails loudly on a present-but-invalid value rather than yielding NaN/negative", () => {
+    // These are exactly the values that would otherwise crash CostAccountant later;
+    // parseBudgetUsd surfaces them as a clear error naming the env var.
+    expect(() => parseBudgetUsd("fast")).toThrow(/YAMMER_LIVE_BUDGET_USD/);
+    expect(() => parseBudgetUsd("-1")).toThrow(/positive USD amount/);
+    expect(() => parseBudgetUsd("0")).toThrow(/positive USD amount/);
+    expect(() => parseBudgetUsd("NaN")).toThrow(/YAMMER_LIVE_BUDGET_USD/);
   });
 });
 

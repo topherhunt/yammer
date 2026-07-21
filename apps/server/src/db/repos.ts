@@ -339,32 +339,37 @@ export function createRepos(db: Database): Repos {
         newText: "",
         summary: "Created document",
       });
-      // Insert the document BEFORE the version: versions.document_id is now an FK to
-      // documents(id), so the parent row must exist first. (current_version_id has no
-      // FK, so pointing it at the not-yet-inserted version id is fine.)
-      await db.insert(documents).values({
-        id: documentId,
-        userId,
-        name,
-        createdAt: now,
-        updatedAt: now,
-        currentVersionId: initial.id,
-        undoStack: [initial.id],
-        undoCursor: 0,
-      });
-      await db.insert(versions).values({
-        id: initial.id,
-        userId,
-        documentId,
-        seq: initial.seq,
-        parentVersionId: initial.parentVersionId,
-        author: initial.author,
-        kind: initial.kind,
-        summary: initial.summary,
-        fullText: initial.fullText,
-        diff: initial.diff,
-        createdAt: initial.createdAt,
-        restoredFromVersionId: null,
+      // The document row and its seq-0 create version must commit together: a doc
+      // row without its create version dangles currentVersionId (reads 500), and a
+      // version without its doc row violates the FK. One transaction keeps the pair
+      // atomic. Insert the document BEFORE the version: versions.document_id is an FK
+      // to documents(id), so the parent row must exist first. (current_version_id has
+      // no FK, so pointing it at the not-yet-inserted version id is fine.)
+      await db.transaction(async (tx) => {
+        await tx.insert(documents).values({
+          id: documentId,
+          userId,
+          name,
+          createdAt: now,
+          updatedAt: now,
+          currentVersionId: initial.id,
+          undoStack: [initial.id],
+          undoCursor: 0,
+        });
+        await tx.insert(versions).values({
+          id: initial.id,
+          userId,
+          documentId,
+          seq: initial.seq,
+          parentVersionId: initial.parentVersionId,
+          author: initial.author,
+          kind: initial.kind,
+          summary: initial.summary,
+          fullText: initial.fullText,
+          diff: initial.diff,
+          createdAt: initial.createdAt,
+          restoredFromVersionId: null,
+        });
       });
       return {
         id: documentId,
@@ -422,72 +427,83 @@ export function createRepos(db: Database): Repos {
     },
 
     async append(userId, version, undo) {
-      // Ownership backstop: never insert a version against a document the caller
-      // does not own (do not trust the route to have checked). A version's userId
-      // FK alone would accept a foreign document; this asserts the pairing.
-      const ownerRows = await db
-        .select({ id: documents.id })
-        .from(documents)
-        .where(
-          and(
-            eq(documents.userId, userId),
-            eq(documents.id, version.documentId),
-          ),
-        );
-      if (!ownerRows[0]) {
-        throw new Error(
-          `Cannot append version: document ${version.documentId} not found for this user.`,
-        );
-      }
+      // The version INSERT and the head-advance UPDATE must be all-or-nothing.
+      // Committed separately, a crash between them either bricks the doc (the
+      // version took but head never moved -> future appends hit UNIQUE(doc,seq)
+      // forever) or dangles currentVersionId (head moved but the version was rolled
+      // back -> reads 500 forever). One transaction keeps them atomic; the
+      // ownership assertion, the UNIQUE(doc,seq) seq check, and the 0-row head-
+      // advance guard all live inside it so any failure rolls the whole pair back.
+      const inserted = await db.transaction(async (tx) => {
+        // Ownership backstop: never insert a version against a document the caller
+        // does not own (do not trust the route to have checked). A version's userId
+        // FK alone would accept a foreign document; this asserts the pairing.
+        const ownerRows = await tx
+          .select({ id: documents.id })
+          .from(documents)
+          .where(
+            and(
+              eq(documents.userId, userId),
+              eq(documents.id, version.documentId),
+            ),
+          );
+        if (!ownerRows[0]) {
+          throw new Error(
+            `Cannot append version: document ${version.documentId} not found for this user.`,
+          );
+        }
 
-      // Insert the version. A UNIQUE(document_id, seq) violation from a truly
-      // concurrent append surfaces here (23505) for the route to map to a 409.
-      const inserted = await db
-        .insert(versions)
-        .values({
-          id: version.id,
-          userId,
-          documentId: version.documentId,
-          seq: version.seq,
-          parentVersionId: version.parentVersionId,
-          author: version.author,
-          kind: version.kind,
-          summary: version.summary,
-          fullText: version.fullText,
-          diff: version.diff,
-          createdAt: version.createdAt,
-          restoredFromVersionId: version.restoredFromVersionId ?? null,
-        })
-        .returning();
-      // The newly appended version becomes the document head (documents has no
-      // text column -- the ActiveDocument text is read from the head version's
-      // fullText). When the client supplies its undo timeline we persist it too;
-      // otherwise undoStack/undoCursor are left untouched (a bare append cannot
-      // tell a forward edit from an undo/redo navigation).
-      const advanced = await db
-        .update(documents)
-        .set({
-          currentVersionId: version.id,
-          updatedAt: version.createdAt,
-          ...(undo
-            ? { undoStack: undo.undoStack, undoCursor: undo.undoCursor }
-            : {}),
-        })
-        .where(
-          and(
-            eq(documents.userId, userId),
-            eq(documents.id, version.documentId),
-          ),
-        )
-        .returning({ id: documents.id });
-      // A head advance that matched no row means the version "took" but the
-      // document head did not move -- an edit that silently did not persist. Fail
-      // loudly rather than return a version that isn't actually the head.
-      if (advanced.length !== 1) {
-        throw new Error(
-          `Head advance for document ${version.documentId} affected ${advanced.length} rows, expected 1.`,
-        );
-      }
+        // Insert the version. A UNIQUE(document_id, seq) violation from a truly
+        // concurrent append surfaces here (23505) for the route to map to a 409.
+        const insertedRows = await tx
+          .insert(versions)
+          .values({
+            id: version.id,
+            userId,
+            documentId: version.documentId,
+            seq: version.seq,
+            parentVersionId: version.parentVersionId,
+            author: version.author,
+            kind: version.kind,
+            summary: version.summary,
+            fullText: version.fullText,
+            diff: version.diff,
+            createdAt: version.createdAt,
+            restoredFromVersionId: version.restoredFromVersionId ?? null,
+          })
+          .returning();
+        // The newly appended version becomes the document head (documents has no
+        // text column -- the ActiveDocument text is read from the head version's
+        // fullText). When the client supplies its undo timeline we persist it too;
+        // otherwise undoStack/undoCursor are left untouched (a bare append cannot
+        // tell a forward edit from an undo/redo navigation).
+        const advanced = await tx
+          .update(documents)
+          .set({
+            currentVersionId: version.id,
+            updatedAt: version.createdAt,
+            ...(undo
+              ? { undoStack: undo.undoStack, undoCursor: undo.undoCursor }
+              : {}),
+          })
+          .where(
+            and(
+              eq(documents.userId, userId),
+              eq(documents.id, version.documentId),
+            ),
+          )
+          .returning({ id: documents.id });
+        // A head advance that matched no row means the version "took" but the
+        // document head did not move -- an edit that silently did not persist.
+        // Throw so the transaction rolls the version insert back too, rather than
+        // returning a version that isn't actually the head.
+        if (advanced.length !== 1) {
+          throw new Error(
+            `Head advance for document ${version.documentId} affected ${advanced.length} rows, expected 1.`,
+          );
+        }
+        return insertedRows;
+      });
       return toVersion(inserted[0]!);
     },
   };

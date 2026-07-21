@@ -62,7 +62,14 @@ function ChatMessageView({ entry }: { entry: ChatEntry }) {
       );
     case "error":
       return (
-        <li className="qa-chat-entry qa-chat-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
+        // role=status + assertive aria-live so failures (STT/mic/reconnect/save)
+        // are announced to assistive tech, not just shown -- high priority for an
+        // AT-dependent user who is watching the document, not the sidebar.
+        <li
+          role="status"
+          aria-live="assertive"
+          className="qa-chat-entry qa-chat-error rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300"
+        >
           {entry.message}
         </li>
       );

@@ -69,7 +69,8 @@ describe("normal utterance -> optimistic send", () => {
     state = out.state;
     expect(state.phase).toBe("grace");
     expect(state.pending).toEqual({ text: "hello world", seconds: 1.5 });
-    expect(cmdTypes(out.commands)).toEqual(["SCHEDULE_GRACE"]);
+    // The arrived FINAL cancels the finalize-timeout guard before opening grace.
+    expect(cmdTypes(out.commands)).toEqual(["CANCEL_FINALIZE", "SCHEDULE_GRACE"]);
     expect(indicatorFor(state).finalizing).toBe(true);
 
     out = reduceListening(state, { type: "GRACE_ELAPSED" });
@@ -115,7 +116,7 @@ describe("optimistic-send cancel-on-resume (barge-in)", () => {
       text: "first part second part",
       seconds: 3,
     });
-    expect(cmdTypes(combined.commands)).toEqual(["SCHEDULE_GRACE"]);
+    expect(cmdTypes(combined.commands)).toEqual(["CANCEL_FINALIZE", "SCHEDULE_GRACE"]);
 
     // Now the window elapses: one combined submit for the whole thought.
     const sent = reduceListening(combined.state, { type: "GRACE_ELAPSED" });
@@ -133,7 +134,8 @@ describe("optimistic-send cancel-on-resume (barge-in)", () => {
     expect(state.phase).toBe("finalizing");
     const resumed = reduceListening(state, { type: "SPEECH_START" });
     expect(resumed.state.phase).toBe("speaking");
-    expect(resumed.commands).toEqual([]);
+    // Resuming out of finalizing cancels the finalize-timeout guard.
+    expect(resumed.commands).toEqual([{ type: "CANCEL_FINALIZE" }]);
   });
 });
 

@@ -7,7 +7,8 @@ import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import type { LlmProvider, SearchProvider, Version } from "@yammer/shared";
+import type { LlmProvider, SearchProvider } from "@yammer/shared";
+import { versionSchema } from "@yammer/shared";
 import {
   DuplicateNameError,
   isUniqueViolation,
@@ -205,16 +206,17 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
       undoCursor?: unknown;
     } | null;
 
-    const version = body?.version as Version | undefined;
-    if (
-      !version ||
-      typeof version !== "object" ||
-      typeof version.id !== "string" ||
-      typeof version.seq !== "number" ||
-      typeof version.documentId !== "string"
-    ) {
-      return c.json({ error: "version (with id, seq, documentId) is required" }, 400);
+    // Validate the FULL version envelope, not just id/seq/documentId. Casting the
+    // rest as Version let a malformed body persist an inconsistent snapshot or 500
+    // on a NULL column; versionSchema rejects it as a clean 400 instead.
+    const parsedVersion = versionSchema.safeParse(body?.version);
+    if (!parsedVersion.success) {
+      return c.json(
+        { error: "invalid version", detail: parsedVersion.error.issues },
+        400,
+      );
     }
+    const version = parsedVersion.data;
     if (version.documentId !== id) {
       return c.json({ error: "version.documentId does not match the URL" }, 400);
     }

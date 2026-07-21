@@ -15,6 +15,11 @@ import type { WebSocketLike } from "../stt/ws-stt";
 // test/module graph. Everything it wires is exercised in unit tests through the
 // interfaces; this factory is verified later in a real browser with real keys.
 
+/** Ceiling on how long to await an STT final while `finalizing` before surfacing
+ * a retryable error instead of hanging. Deliberately generous -- only a genuinely
+ * lost final (dropped socket) should trip it. */
+const FINALIZE_TIMEOUT_MS = 8000;
+
 /** Derive the ws(s):// STT endpoint from the http(s) API base. */
 function sttUrlFrom(apiBase: string): string {
   const url = new URL(apiBase || "/", window.location.href);
@@ -44,11 +49,9 @@ export function createVoice(
     mic,
     vad,
     latency: "low",
-    onError: (message) => {
-      // TODO(voice): route into the chat error log once the store exposes a
-      // public voice-error channel; explicit console surfacing for now.
-      console.error("[voice] STT error:", message);
-    },
+    // Route socket/protocol/reconnect failures into the chat error log via the
+    // store's public voice-error channel (shown + announced via aria-live).
+    onError: (message) => store.getState().pushVoiceError(message),
   });
   // Open-source, keyless Vosk spotter for "Yammer, wake up". The model URL is
   // configurable; place a small Vosk model .tar.gz at the default public path.
@@ -68,7 +71,13 @@ export function createVoice(
     // authoritative (updates app.listening + plays the unmute SFX).
     onResumeRequested: () =>
       store.getState().dispatch({ type: "set_listening", state: "listening" }),
+    // Finalize-timeout + autonomous capture failures surface through the same
+    // public voice-error channel so they are shown and announced.
+    notifyError: (message) => store.getState().pushVoiceError(message),
     graceMs: store.getState().app.settings.optimisticSendMs,
+    // No dedicated setting (Settings is frozen); a generous fixed ceiling that
+    // only trips when the STT final genuinely never lands (e.g. a dropped socket).
+    finalizeMs: FINALIZE_TIMEOUT_MS,
   });
 
   if (typeof document !== "undefined") {

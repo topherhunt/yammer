@@ -357,6 +357,12 @@ Each phase ends green (tests pass) and demoable.
 - **Phase 4 -- Voice.** `SttProvider` + `gpt-realtime-whisper` WS proxy, tap-to-start gate, listen/pause/mute state machine, Vosk wake-word resume, pulse + radial indicators, optimistic-send grace window, AI-interpreted stop. The first real "talk to it" build.
 - **Phase 5 -- Research.** `/api/research` search (Tavily) + read + summarize-to-notebook, thinking-status streaming, `research` action.
 - **Phase 6 -- Polish + hardening.** STT-correction UX, spend meter, downloadable diagnostic log, accessibility pass, prompt-eval golden set, real-model tuning (incl. large-doc edit-accuracy eval for Luna), error surfacing, settings screen.
+- **Phase 7 -- Comprehensive multi-agent audit (do once the app is feature-complete).** A series of thorough fan-out, multi-agent scans for remaining issues -- the parallel reviews during the build repeatedly surfaced real reliability and security problems, so make this a deliberate, budgeted pass rather than an afterthought. Fan out independent agents per dimension, then **adversarially verify** each finding (a second agent tries to refute it) before it makes the fix list, and prioritize by user impact. Dimensions to cover:
+  - **Reliability:** every hardware/network seam (mic, STT socket, DB), error handling and surfacing (no silent failures), durability and the append-only invariants, retry/reconnect/timeout coverage, concurrency and races. This is the charter's "never lose the writing / never a silent dead mic" surface.
+  - **Security:** authn/authz and per-user isolation, input validation at every boundary, injection/XSS, secret handling, the WS/`/api` edge (Origin, pre-auth DoS, rate limiting), and per-user/cumulative spend ceilings.
+  - **Code smell / simplification:** duplication, dead code, over-abstraction, inconsistent patterns, test titles that under-deliver on their promise.
+  - **Architecture:** module boundaries and coupling, the pure-core/effects discipline, contract integrity (shared types vs runtime schemas), and whether the client-authoritative split still holds cleanly.
+  Clear the resulting backlog (this §16 list plus whatever the audit adds) before considering v1 done. Re-run periodically after major changes.
 
 ---
 
@@ -403,6 +409,8 @@ From the multi-agent code review. The durability/correctness/cheap-safety items 
 - Per-user rate limiting + a per-user/daily **spend ceiling** checked (sum `turns.usage`) before each external call. The spend meter is display-only today.
 - Session revocation: sessions are currently a stateless HMAC of `{uid,iat}` valid the full expiry regardless of logout. Add a `sessionVersion` in the user row (or a sessions table) so logout/compromise can revoke; consider a shorter expiry. Relevant for caregiver/shared-device use.
 - Consider a DB trigger/role denying `UPDATE`/`DELETE` on the append-only `versions`/`turns` tables (FKs added now cover referential integrity).
+- **WS `/api/stt` edge hardening:** an Origin allowlist on the upgrade (needs the prod domain), reject unauthenticated sockets before the full handshake + DB lookup (pre-auth DoS surface), and rate-limit upgrades. Plus a rolling **per-user cumulative STT spend ceiling** (today only per-session caps exist, so a looping authenticated client could sustain ongoing cost).
+- **Single shared mic MediaStream:** the mute-releases-mic privacy fix is done, but capture + VAD (+ Vosk while paused) still open separate `getUserMedia` streams during listening; share one stream. Minor edge: rapid pause->resume can briefly orphan a Vosk stream; pre-ready prebuffer streams a little leading silence (bounded).
 
 **Accepted tradeoff (documented, not a bug):**
 - With the client-authoritative design, `/api/documents/:id/versions` trusts client-supplied version *content* (`fullText`, `author`, `kind`, `diff`). The server guarantees only monotonic seq + ownership + referential integrity, not that a version is a genuine reducer output. Acceptable for a single-user tool; revisit if the trust model ever changes.
