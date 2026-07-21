@@ -132,15 +132,14 @@ Action types (initial set, extensible):
 **Document management**
 - `new_document` -- `{ name?: string }`
 - `rename_document` -- `{ name }`
-- `load_document` -- `{ documentId?, byName?, byDate? }`
-- `list_documents` -- `{ sort?: 'name' | 'created' | 'updated' }`
+- `load_document` -- `{ documentId?, byName?, byDate? }` (opens a document; listing the documents is `open_dialog{dialog:'load'}`)
 
 **Navigation / UI**
 - `scroll` -- `{ target: 'document' | 'chat' | 'active', direction: 'up' | 'down', amount: 'line' | 'page' }`
-- `open_dialog` -- `{ dialog: 'menu' | 'help' | 'load' | 'history' }`
+- `open_dialog` -- `{ dialog: 'menu' | 'help' | 'load' | 'history', sort? }`. The single way to open any dialog (including edit history and the document list); `sort` is only meaningful for `load` and persists. Deliberately one action per dialog, not a generic opener plus per-dialog aliases, to keep the command-interpretation surface small.
 - `close_dialog`
 - `set_panel` -- `{ panel: 'chat' | 'document' }` (mobile toggle)
-- `show_edit_history`
+- `copy_document` -- copies the full document to the clipboard; the edge writes both a plaintext and a rendered-HTML flavor (from TASKS.md).
 
 **Research**
 - `research` -- `{ queries: string[] }`. Only ever emitted when the user explicitly asks. Triggers the multi-step backend research flow (§8), whose summary is injected back into chat context.
@@ -148,7 +147,9 @@ Action types (initial set, extensible):
 **Meta**
 - `clarify` -- `{ question: string }`. When a command is ambiguous (e.g. "restore that paragraph" with no clear referent), the AI asks rather than guessing. Surfaced as a chat message; no state mutation.
 
-The reducer signature: `applyAction(state: AppState, action: Action): { state: AppState, effects: Effect[] }`. Effects are side-effect requests (persist version, run research, focus scroll) handled at the edges -- keeping the reducer pure.
+The reducer signature: `applyAction(state, action, ctx): { state, effects, error? }`. Effects are side-effect requests (persist version, run research, focus scroll) handled at the edges -- keeping the reducer pure. `ctx` injects `newId`/`now`/`author` for determinism under test.
+
+**Multi-action turn semantics: best-effort, not atomic (a deliberate choice).** When a turn contains several actions, each is applied independently; a failed action surfaces an error entry and threads state forward, and later independent actions still run. We chose this over atomic all-or-nothing because atomicity would discard good work -- e.g. throwing away a paragraph the user just dictated because an *unrelated* edit in the same turn had a missed anchor -- which is unacceptable for a voice user who cannot retype. The fail-explicit edit engine (ambiguous anchors throw) already limits the "silently applied to the wrong place" risk, and per-action chat entries keep partials legible. `ReduceResult.error` aggregates any failures so the edges/diagnostics can see them, and leaves the door open for an atomic policy at the edge later without changing the pure core. Pinned by tests in `reducer.test.ts`.
 
 ---
 

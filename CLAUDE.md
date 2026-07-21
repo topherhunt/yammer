@@ -1,0 +1,67 @@
+# CLAUDE.md -- Yammer
+
+Guidance for any AI agent working in this repo. Read this first, then `plan.md` (the full blueprint) and `vision.md` (the origin).
+
+## What this is
+
+**Yammer** is a 100% voice-driven, AI-driven text editor. The target user is a person with ALS who has lost most muscle function and wants to write, AI-chat, and research using only their voice. Mouse and keyboard work fully but are never *required*. Speech becomes text; text goes to an LLM with rich situational context; the LLM returns structured actions (edits, navigation, chat); the app applies them. Every edit is recorded in append-only history.
+
+This is a real tool for a real person. Reliability and low friction matter more than cleverness. A dropped edit or a mic that won't restart is not a bug ticket -- it's someone losing their voice for the afternoon.
+
+## Absolute rules
+
+- **Never issue git write commands. Ever.** No `commit`, `branch`, `checkout`, `stash`, `reset`, `rebase`, `merge`, `push`, `add`/staging, `tag`, or anything that mutates history or the tree. Read-only git only (`log`, `diff`, `status`, `show`, `blame`). The user handles 100% of git. A prior "yes" never generalizes. This holds in every mode, including auto.
+- **External API calls cost real dollars** (OpenAI, Tavily, etc.) -- distinct from the Claude-Code token budget. Before running anything that fans out real API calls (evals, batch jobs, the live-test tier, any SDK call in a loop over >~5 records), STOP and confirm with the user, with rough cost and runtime. Single-record dry runs under ~$0.50 are fine.
+- **Never auto-commit at session end.** Run quality gates (tests, typecheck), summarize what changed and what's open, then let the user commit.
+
+## Architecture (the load-bearing ideas)
+
+1. **Everything the AI does is a structured `Action`.** The LLM never mutates state directly. It returns `{ chatMessage?, actions: Action[] }`, validated with Zod. A **pure reducer** `applyAction(state, action, ctx) -> { state, effects }` applies them. This is what makes the system testable, auditable, and safe. Do not let LLM output touch the DOM or DB directly -- it goes through the Action schema and the reducer.
+2. **The pure core is the star.** `packages/core` (edit engine, reducer, history, context assembler) and `packages/shared` (types, Zod schemas, provider interfaces) have **zero** DOM/network/DB dependencies. Side effects are returned as `Effect[]` and handled at the edges. Maximize what lives here, because this is where the fast unit tests live. If you're tempted to import `fetch`, a DB client, or `document` into core, you're doing it wrong.
+3. **Append-only history.** We store the **full text snapshot at every version** plus a computed diff for display. Restores and undo are new appended versions (like a git revert commit), never in-place mutation. Snapshots make restore/undo a trivial, corruption-proof row read -- we deliberately chose this over deltas/CRDT because space is cheap and correctness is not.
+4. **Everything external is pluggable behind an interface.** `LlmProvider`, `SttProvider`, `SearchProvider` live in `packages/shared`. No provider-specific code leaks into domain logic. Swapping a model is a config string.
+
+### Locked decisions (see plan.md for rationale)
+
+- **Stack:** TypeScript everywhere. pnpm monorepo. React + Vite frontend, CodeMirror 6 editor, Zustand, Tailwind. Hono backend on Node. PostgreSQL + Drizzle. Google OAuth.
+- **LLM:** GPT-5.6 **Luna** in dev, **Terra** in prod (same family = dev/prod parity), via OpenAI direct behind `LlmProvider`. Structured output, not free-form tool calls.
+- **STT:** `gpt-realtime-whisper` (streaming transcription, $0.017/min) over a backend WebSocket proxy. NOT the speech-to-speech `gpt-realtime-2.1`. Web Speech is a desktop-Chrome-only fallback.
+- **Voice UX:** tap-to-start gate; three states (listening / paused / muted). Pause keeps a local Porcupine wake-word spotter alive; **"Yammer, wake up"** resumes hands-free. Stop is AI-interpreted from any *explicit* phrasing (bare "stop" must not pause). SFX on send and mute/unmute. Pause on tab-background, resume on foreground.
+- **Research:** DIY pipeline (search -> LLM picks pages -> fetch -> summarize-to-notebook), default provider **Tavily**. Only the digested summary enters context, never raw pages. Never invoked unprompted.
+- **Hosting:** self-hosted Racknerd VPS behind Caddy, new DB on the existing Postgres. Deployment is deferred; keep the server plain-`node`-runnable.
+- **Features to remember:** per-document spend meter (STT + inference $) at the bottom of the chat sidebar; downloadable diagnostic log (transcripts -> raw LLM responses -> actions + full edit history); recency-fading yellow edit highlights so corrections are just the next edit.
+
+## Code style
+
+- **No em dashes.** Use `--` everywhere (code, comments, prose, commits).
+- **No hard line wraps within a paragraph.** One line per paragraph/bullet; let the editor soft-wrap. Applies to Markdown and prose too.
+- **Fail explicitly, not gracefully.** Surface problems loudly. Don't paper over expected-data problems with `?.`/`??`. Crash clearly when an invariant is violated (e.g. an edit anchor that doesn't match, or matches ambiguously, throws -- it does not silently no-op).
+- **CSS is utility-first (Tailwind).** Compose from utilities before adding classes. A page-specific class only for a genuine multi-property, stateful component.
+- **Scope discipline.** Implement what's asked, nothing speculative. Don't refactor working code or add abstractions for cases that can't happen. Three similar lines beat a premature abstraction. Clean up anything your change orphans; flag (don't silently delete) pre-existing dead code.
+- **Read the actual code before changing or describing it.** Follow real imports and data flow; don't infer behavior from names. State what you haven't verified.
+
+## Testing
+
+- Optimize for **"as much as possible covered by unit tests"** -- enabled by the pure core. Reducer, edit engine, history, context assembler, schema validation: all unit-tested with no browser/network.
+- **Test titles are promises.** The test must verify what its name claims. No `expect(status).toBe(200)` as the only assertion -- assert against rendered content or returned data.
+- **Use `qa-*` CSS classes as stable selectors** in E2E, never user-visible text (copy changes and breaks tests). Add `qa-*` hooks to templates when writing tests.
+- For a bug fix, write the failing test that reproduces it first, then fix.
+- Three test tiers: fast unit (default), mocked E2E (Playwright, STT+LLM mocked), and an **opt-in live-API tier** that hits real models -- always cost-accounted, hard-capped, and never in normal `pnpm test`/CI.
+- Run tests + typecheck after changes before calling work done.
+
+## Collaboration
+
+- Surface assumptions; if a request is ambiguous, name the readings rather than silently picking one.
+- Push back constructively when you see a better approach. Respect a "no" -- don't re-apply a rejected change.
+- Prefer the auto-approved file tools (Read/Edit/Write/Grep/Glob) over bash equivalents. Don't use `chmod`.
+
+## Layout
+
+```
+packages/shared   # the contract: Action/AppState types, Zod schemas, provider interfaces (no deps but zod)
+packages/core     # pure domain: edit engine, reducer, history, context assembler (+ unit tests)
+apps/server       # Hono API, WS STT proxy, Postgres/Drizzle, auth, LLM/search adapters   (fan-out)
+apps/web          # React/Vite UI, CodeMirror, voice pipeline, chat sidebar               (fan-out)
+```
+
+Build order: foundation (`shared` + `core`) is the frozen contract; the apps fan out against it. Don't add app-layer concerns to the core packages.
