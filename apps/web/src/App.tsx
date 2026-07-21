@@ -3,14 +3,31 @@ import type { AppStore } from "./store/store";
 import { getDefaultStore } from "./store/default-store";
 import { StoreProvider } from "./store/context";
 import { AppShell } from "./components/AppShell";
+import { AuthGate } from "./components/AuthGate";
 
-// Root: wires a store (the module default for the real app, or an injected one
-// for tests) into the provider and renders the shell.
+// Root. Tests (and any embedder) inject a store and render the shell directly.
+// The real app gates on sign-in first, then lazily builds the default store (so
+// the heavy voice pipeline import only happens once authenticated).
 
 export function App({ store }: { store?: StoreApi<AppStore> } = {}) {
-  const s = store ?? getDefaultStore();
+  if (store) {
+    return (
+      <StoreProvider store={store}>
+        <AppShell />
+      </StoreProvider>
+    );
+  }
   return (
-    <StoreProvider store={s}>
+    <AuthGate>
+      <DefaultApp />
+    </AuthGate>
+  );
+}
+
+function DefaultApp() {
+  const store = getDefaultStore();
+  return (
+    <StoreProvider store={store}>
       <AppShell />
     </StoreProvider>
   );

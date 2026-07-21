@@ -62,7 +62,7 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
         <aside
           className={cx(
-            "qa-chat-sidebar w-full shrink-0 border-r border-gray-200 dark:border-gray-800 md:flex md:w-[30%]",
+            "qa-chat-sidebar w-full shrink-0 border-r border-gray-200 dark:border-gray-800 md:flex md:w-1/3",
             showChat ? "flex" : "hidden",
           )}
         >
