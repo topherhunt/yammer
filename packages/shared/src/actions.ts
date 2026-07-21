@@ -48,6 +48,19 @@ export const restoreFragmentAction = z.object({
   replace: z.string(),
 });
 
+// Relative navigation along the undo timeline. `count` supports "undo the last
+// three actions". Undo/redo move a cursor over the timeline rather than just
+// toggling the two most recent states, so repeated undos walk backward.
+export const undoAction = z.object({
+  type: z.literal("undo"),
+  count: z.number().int().positive().optional(),
+});
+
+export const redoAction = z.object({
+  type: z.literal("redo"),
+  count: z.number().int().positive().optional(),
+});
+
 // -- Document management --------------------------------------------------
 
 export const newDocumentAction = z.object({
@@ -97,6 +110,13 @@ export const copyDocumentAction = z.object({
   // plaintext and a rendered-HTML flavor; the core only carries the text.
 });
 
+// Download the document as a file. ".md" is the raw text; ".docx" is converted
+// at the edge (marked -> HTML -> html-to-docx, no system binary needed).
+export const downloadDocumentAction = z.object({
+  type: z.literal("download_document"),
+  format: z.enum(["md", "docx"]),
+});
+
 // -- Listening control ----------------------------------------------------
 
 export const setListeningAction = z.object({
@@ -129,6 +149,8 @@ export const actionSchema = z.discriminatedUnion("type", [
   insertTextAction,
   restoreVersionAction,
   restoreFragmentAction,
+  undoAction,
+  redoAction,
   newDocumentAction,
   renameDocumentAction,
   loadDocumentAction,
@@ -137,6 +159,7 @@ export const actionSchema = z.discriminatedUnion("type", [
   closeDialogAction,
   setPanelAction,
   copyDocumentAction,
+  downloadDocumentAction,
   setListeningAction,
   researchAction,
   downloadDiagnosticsAction,

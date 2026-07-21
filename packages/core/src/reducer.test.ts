@@ -257,6 +257,87 @@ describe("clarify and research", () => {
   });
 });
 
+describe("undo / redo (cursor walks the timeline, never cycles)", () => {
+  // Build a 3-step document: "one" -> "one two" -> "one two three".
+  function threeSteps() {
+    const c = makeCtx("ai");
+    let s = docState("one");
+    s = applyAction(s, { type: "insert_text", position: "end", text: " two" }, c).state;
+    s = applyAction(s, { type: "insert_text", position: "end", text: " three" }, c).state;
+    return { s, c };
+  }
+
+  it("steps backward one version per undo instead of toggling two states", () => {
+    let { s, c } = threeSteps();
+    expect(s.activeDocument?.text).toBe("one two three");
+    expect(s.undoCursor).toBe(2);
+
+    s = applyAction(s, { type: "undo" }, c).state;
+    expect(s.activeDocument?.text).toBe("one two");
+    expect(s.undoCursor).toBe(1);
+
+    s = applyAction(s, { type: "undo" }, c).state;
+    expect(s.activeDocument?.text).toBe("one"); // walked back, did not cycle to "one two three"
+    expect(s.undoCursor).toBe(0);
+  });
+
+  it("undo appends to the audit history without shrinking the timeline", () => {
+    let { s, c } = threeSteps();
+    const historyBefore = s.history.length;
+    const stackBefore = [...s.undoStack];
+    s = applyAction(s, { type: "undo" }, c).state;
+    expect(s.history.length).toBe(historyBefore + 1); // append-only audit trail
+    expect(s.undoStack).toEqual(stackBefore); // timeline unchanged; only the cursor moved
+    expect(s.history[s.history.length - 1]?.kind).toBe("undo");
+  });
+
+  it("undoes several steps at once with a count", () => {
+    let { s, c } = threeSteps();
+    s = applyAction(s, { type: "undo", count: 2 }, c).state;
+    expect(s.activeDocument?.text).toBe("one");
+    expect(s.undoCursor).toBe(0);
+  });
+
+  it("redoes forward after undoing", () => {
+    let { s, c } = threeSteps();
+    s = applyAction(s, { type: "undo", count: 2 }, c).state; // -> "one"
+    s = applyAction(s, { type: "redo" }, c).state;
+    expect(s.activeDocument?.text).toBe("one two");
+    s = applyAction(s, { type: "redo" }, c).state;
+    expect(s.activeDocument?.text).toBe("one two three");
+  });
+
+  it("a new edit after undo drops the redo tail", () => {
+    let { s, c } = threeSteps();
+    s = applyAction(s, { type: "undo" }, c).state; // -> "one two", cursor 1
+    s = applyAction(s, { type: "insert_text", position: "end", text: " four" }, c).state;
+    expect(s.activeDocument?.text).toBe("one two four");
+
+    const redo = applyAction(s, { type: "redo" }, c);
+    expect(redo.error).toMatch(/Nothing to redo/); // "one two three" is no longer reachable
+  });
+
+  it("errors when there is nothing to undo or redo", () => {
+    const c = makeCtx("ai");
+    const s = docState("x"); // single create version, cursor 0
+    expect(applyAction(s, { type: "undo" }, c).error).toMatch(/Nothing to undo/);
+    expect(applyAction(s, { type: "redo" }, c).error).toMatch(/Nothing to redo/);
+  });
+});
+
+describe("download_document", () => {
+  it("requests an export effect in the chosen format", () => {
+    const { effects } = applyAction(
+      docState("# Title"),
+      { type: "download_document", format: "docx" },
+      makeCtx("ai"),
+    );
+    expect(effects).toEqual([
+      { type: "export_document", documentId: "doc1", format: "docx" },
+    ]);
+  });
+});
+
 describe("copy_document", () => {
   it("requests the full document text be copied to the clipboard", () => {
     const { effects } = applyAction(

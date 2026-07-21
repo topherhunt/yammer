@@ -63,9 +63,58 @@ function errorResult(state: AppState, ctx: Ctx, message: string): ReduceResult {
   return { state: next, effects, error: message };
 }
 
-/** Commit a new document version: update the active doc, append to history, log
- * an attributed chat entry, and request persistence. Shared by every editing
- * action so the append-only invariant lives in exactly one place. */
+function chatEntryFor(version: Version, ctx: Ctx): ChatEntry {
+  // Any version with a source is a "went back/forward to a prior state" move
+  // (restore/undo/redo); everything else is a plain edit.
+  if (version.restoredFromVersionId !== undefined) {
+    return {
+      kind: "restore",
+      id: ctx.newId(),
+      at: ctx.now(),
+      author: ctx.author,
+      summary: version.summary,
+      versionId: version.id,
+      restoredFromVersionId: version.restoredFromVersionId,
+    };
+  }
+  return {
+    kind: "edit",
+    id: ctx.newId(),
+    at: ctx.now(),
+    author: ctx.author,
+    summary: version.summary,
+    versionId: version.id,
+  };
+}
+
+/** Append a version to the audit history, point the document at it, log the
+ * attributed chat entry, and set the undo timeline -- the one place the
+ * append-only invariant and the cursor bookkeeping live. */
+function appendVersion(
+  state: AppState,
+  version: Version,
+  undoStack: string[],
+  undoCursor: number,
+  ctx: Ctx,
+): ReduceResult {
+  const next: AppState = {
+    ...state,
+    activeDocument: {
+      ...state.activeDocument!,
+      text: version.fullText,
+      currentVersionId: version.id,
+      currentSeq: version.seq,
+    },
+    history: [...state.history, version],
+    undoStack,
+    undoCursor,
+    chat: [...state.chat, chatEntryFor(version, ctx)],
+  };
+  return { state: next, effects: [{ type: "persist_version", version }] };
+}
+
+/** A forward mutation (edit/insert/restore/rename): appends a new version and
+ * pushes it as a new undo step, truncating any redo tail from the timeline. */
 function commitVersion(
   state: AppState,
   ctx: Ctx,
@@ -77,12 +126,11 @@ function commitVersion(
   },
 ): ReduceResult {
   const doc = state.activeDocument!;
-  const parent = currentVersion(state.history);
   const version = createVersion({
     id: ctx.newId(),
     createdAt: ctx.now(),
     documentId: doc.id,
-    parent,
+    parent: currentVersion(state.history),
     author: ctx.author,
     kind: args.kind,
     newText: args.newText,
@@ -91,40 +139,38 @@ function commitVersion(
       ? { restoredFromVersionId: args.restoredFromVersionId }
       : {}),
   });
+  // Drop the redo tail (anything after the cursor), then push this step.
+  const undoStack = [...state.undoStack.slice(0, state.undoCursor + 1), version.id];
+  return appendVersion(state, version, undoStack, undoStack.length - 1, ctx);
+}
 
-  const entry: ChatEntry =
-    args.kind === "restore" && args.restoredFromVersionId !== undefined
-      ? {
-          kind: "restore",
-          id: ctx.newId(),
-          at: ctx.now(),
-          author: ctx.author,
-          summary: args.summary,
-          versionId: version.id,
-          restoredFromVersionId: args.restoredFromVersionId,
-        }
-      : {
-          kind: "edit",
-          id: ctx.newId(),
-          at: ctx.now(),
-          author: ctx.author,
-          summary: args.summary,
-          versionId: version.id,
-        };
-
-  const next: AppState = {
-    ...state,
-    activeDocument: {
-      ...doc,
-      text: args.newText,
-      currentVersionId: version.id,
-      currentSeq: version.seq,
-    },
-    history: [...state.history, version],
-    chat: [...state.chat, entry],
-  };
-
-  return { state: next, effects: [{ type: "persist_version", version }] };
+/** Undo/redo: move the cursor to a version already on the timeline and append a
+ * navigation version reflecting it, without changing the timeline itself. */
+function commitNavigation(
+  state: AppState,
+  ctx: Ctx,
+  kind: "undo" | "redo",
+  targetCursor: number,
+  steps: number,
+): ReduceResult {
+  const doc = state.activeDocument!;
+  const targetId = state.undoStack[targetCursor]!;
+  const target = findVersion(state.history, targetId)!;
+  const version = createVersion({
+    id: ctx.newId(),
+    createdAt: ctx.now(),
+    documentId: doc.id,
+    parent: currentVersion(state.history),
+    author: ctx.author,
+    kind,
+    newText: target.fullText,
+    summary:
+      steps === 1
+        ? `${kind === "undo" ? "Undid" : "Redid"} 1 change`
+        : `${kind === "undo" ? "Undid" : "Redid"} ${steps} changes`,
+    restoredFromVersionId: target.id,
+  });
+  return appendVersion(state, version, state.undoStack, targetCursor, ctx);
 }
 
 /** Apply one validated action. */
@@ -209,6 +255,45 @@ export function applyAction(
         summary: `Restored a fragment from version ${target.seq}`,
         restoredFromVersionId: target.id,
       });
+    }
+
+    case "undo": {
+      if (!state.activeDocument) {
+        return errorResult(state, ctx, "No document is open to undo.");
+      }
+      if (state.undoCursor <= 0) {
+        return errorResult(state, ctx, "Nothing to undo.");
+      }
+      const steps = Math.min(action.count ?? 1, state.undoCursor);
+      return commitNavigation(state, ctx, "undo", state.undoCursor - steps, steps);
+    }
+
+    case "redo": {
+      if (!state.activeDocument) {
+        return errorResult(state, ctx, "No document is open to redo.");
+      }
+      const maxCursor = state.undoStack.length - 1;
+      if (state.undoCursor >= maxCursor) {
+        return errorResult(state, ctx, "Nothing to redo.");
+      }
+      const steps = Math.min(action.count ?? 1, maxCursor - state.undoCursor);
+      return commitNavigation(state, ctx, "redo", state.undoCursor + steps, steps);
+    }
+
+    case "download_document": {
+      if (!state.activeDocument) {
+        return errorResult(state, ctx, "No document is open to download.");
+      }
+      return {
+        state,
+        effects: [
+          {
+            type: "export_document",
+            documentId: state.activeDocument.id,
+            format: action.format,
+          },
+        ],
+      };
     }
 
     case "new_document": {

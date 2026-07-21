@@ -16,6 +16,11 @@ export interface SituationalContext {
   openDialog: { kind: DialogKind; contents: string } | null;
   activePanel: Panel;
   listening: ListeningState;
+  /** Rolling summary of the conversation before the checkpoint, so early
+   * standing instructions are never wholly forgotten. Empty until first compaction. */
+  chatSummary: string;
+  /** Chat entries since the checkpoint, sent verbatim (not limited to a window;
+   * the checkpoint advances as older chat is folded into chatSummary). */
   recentChat: { role: string; text: string }[];
   /** Compacted summary of edit history (not every diff). */
   historySummary: string;

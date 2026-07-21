@@ -112,7 +112,7 @@ Your vision worries about storing only deltas to save space while guaranteeing c
 - **Store the full text at every version** (bulletproof: restore = read a row, no replay).
 - **Also store a computed diff** vs the parent purely for display in the history list and chat log.
 - Restores and partial restores (e.g. "restore the 3rd paragraph to a few edits ago") are implemented as: read the old version's text, compute the new full text, append a new `kind: 'restore'` version. History is never mutated -- exactly your git-like requirement.
-- **Undo** is just this restore mechanism pointed at the parent version: "undo that" restores the previous version's full text as a new appended version. Because we store the full snapshot at every step, undo is a trivial, corruption-proof row read -- no diff-inversion needed. (We keep the diff for display; we don't rely on it for correctness.)
+- **Undo/redo walk a cursor over the timeline, so repeated undos don't cycle.** Alongside the append-only `history`, state holds an `undoStack` (the ordered version IDs reachable by undo/redo) and an `undoCursor` (the version the document currently reflects). Undo moves the cursor back (by `count`, for "undo the last three actions") and appends a new `kind: 'undo'` version reflecting that older text; it does *not* push onto the stack, so the *next* undo goes back another step rather than undoing the undo. Redo moves the cursor forward. A brand-new edit made while the cursor is behind the tip truncates the redo tail from the stack (the discarded versions stay in `history` for audit) and starts a fresh branch -- exactly how a text editor's undo behaves. Because we store the full snapshot at every step, each move is a corruption-proof row read; no diff-inversion. Pinned by tests in `reducer.test.ts`.
 
 This gives us the git-like append-only semantics and the "no risk of corruption" guarantee, and it is far simpler and safer than a delta/CRDT replay engine. If disk ever matters we can add snapshot-compaction later (keep every Nth full snapshot + deltas between) without changing the public API. I recommend we **not** reach for Yjs/Automerge/ProseMirror-steps here: those shine for real-time multi-user collaboration, which we do not have.
 
@@ -128,6 +128,7 @@ Action types (initial set, extensible):
 - `edit_text` -- `{ edits: Array<{ find: string, replace: string, occurrence?: number }> }`. Anchored find/replace against the current document text (the same reliable primitive Claude's own file editor uses). The model always sees the current text, so anchors are stable. Produces one new Version.
 - `insert_text` -- `{ position: 'start' | 'end' | { afterFind: string }, text: string }`.
 - `restore_version` -- `{ versionId }` (full restore) or `restore_fragment` -- `{ versionId, find, replace }` (partial restore of a fragment from an old version).
+- `undo` / `redo` -- `{ count? }`. Relative navigation along the undo timeline (see below); `count` supports "undo the last three actions".
 
 **Document management**
 - `new_document` -- `{ name?: string }`
@@ -140,6 +141,7 @@ Action types (initial set, extensible):
 - `close_dialog`
 - `set_panel` -- `{ panel: 'chat' | 'document' }` (mobile toggle)
 - `copy_document` -- copies the full document to the clipboard; the edge writes both a plaintext and a rendered-HTML flavor (from TASKS.md).
+- `download_document` -- `{ format: 'md' | 'docx' }`. `.md` is the raw text; `.docx` is converted server-side via `marked` (markdown -> HTML) piped into `html-to-docx` (HTML -> .docx) -- pure JS, no pandoc/system binary, cleanly formatted. Reachable from the menu and by voice.
 
 **Research**
 - `research` -- `{ queries: string[] }`. Only ever emitted when the user explicitly asks. Triggers the multi-step backend research flow (§8), whose summary is injected back into chat context.
@@ -181,7 +183,7 @@ Assembled by the pure context assembler from AppState:
 - which dialog is open and its contents (list of documents, or the history list, or menu items),
 - **scroll position and what is currently visible on screen** (visible line range),
 - active panel (mobile),
-- the recent chat transcript.
+- **a two-tier chat transcript, not just the recent tail.** The LLM gets (a) a rolling **`chatSummary`** -- a condensed digest of the conversation up to a checkpoint -- plus (b) every chat message **after** the checkpoint, verbatim. This ensures a standing instruction given early ("write in my terse voice") is never point-blank forgotten 30 messages later; it lives on in the summary. The edge periodically **self-summarizes**: once the number of messages since the checkpoint passes `settings.chatCompactThreshold`, it runs a summarization LLM call that folds the older messages into `chatSummary` and advances the checkpoint (`chatSummarizedCount`). The core stores both fields and the context assembler emits them; the summarization call itself lives at the edge. This is distinct from the edit-history summary (which digests document *versions*).
 
 ### Dictation vs command
 Continuous listening means the model receives everything the user says. The system prompt frames every transcript as a **command to interpret**, where "insert this text" is itself one kind of command. The model decides: is this dictation to insert, an edit instruction, a navigation command, or chit-chat? This is the crux UX risk (see Risks) and needs prompt iteration + eval cases.

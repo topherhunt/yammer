@@ -39,6 +39,8 @@ export function docState(
       currentSeq: version.seq,
     },
     history: [version],
+    undoStack: [version.id],
+    undoCursor: 0,
     listening: "listening",
     ...overrides,
   });

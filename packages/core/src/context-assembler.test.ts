@@ -31,25 +31,19 @@ describe("assembleContext", () => {
     expect(ctx.openDialog?.contents).toContain("Letter");
   });
 
-  it("limits recent chat to the requested window", () => {
-    let state = docState("hello");
-    const c = makeCtx("ai");
-    // produce several edits to fill the chat log
-    for (let i = 0; i < 6; i++) {
-      state = applyAction(
-        state,
-        { type: "edit_text", edits: [{ find: "hello", replace: `hello${i}` }] },
-        c,
-      ).state;
-      // rename target back so the next find matches
-      state = applyAction(
-        state,
-        { type: "edit_text", edits: [{ find: `hello${i}`, replace: "hello" }] },
-        c,
-      ).state;
-    }
-    const ctx = assembleContext(state, { recentChatLimit: 3 });
-    expect(ctx.recentChat).toHaveLength(3);
+  it("sends only chat after the checkpoint verbatim and surfaces the summary", () => {
+    const state = docState("hello", {
+      chat: [
+        { kind: "user_message", id: "m1", at: "t", text: "old one" },
+        { kind: "user_message", id: "m2", at: "t", text: "old two" },
+        { kind: "user_message", id: "m3", at: "t", text: "recent three" },
+      ],
+      chatSummary: "User asked to write in a terse style.",
+      chatSummarizedCount: 2, // first two entries are folded into the summary
+    });
+    const ctx = assembleContext(state);
+    expect(ctx.chatSummary).toContain("terse style");
+    expect(ctx.recentChat).toEqual([{ role: "user", text: "recent three" }]);
   });
 
   it("summarizes history rather than dumping every diff", () => {

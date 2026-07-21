@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Genuine multi-property, stateful widgets that can't be composed from
+   utilities: the fading edit highlight, the mic VAD pulse, and the finalize
+   radial. Everything else is utility-first. */
+
+@layer components {
+  /* Recency-fading yellow edit highlight. Opacity is driven per-range by the
+     CodeMirror decoration via the --hl-opacity custom property (see
+     highlight-extension.ts), so older edits are more faded. */
+  .qa-edit-highlight {
+    background-color: rgb(250 204 21 / calc(var(--hl-opacity, 1) * 0.45));
+    border-radius: 2px;
+    transition: background-color 0.4s linear;
+  }
+
+  /* Mic pulses while the VAD reports speech. */
+  .qa-mic-pulsing {
+    animation: qa-mic-pulse 1.1s ease-in-out infinite;
+  }
+
+  @keyframes qa-mic-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgb(239 68 68 / 0.5);
+    }
+    50% {
+      box-shadow: 0 0 0 6px rgb(239 68 68 / 0);
+    }
+  }
+
+  /* Radial "working" spinner shown during finalize/send. */
+  .qa-radial {
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    animation: qa-radial-spin 0.8s linear infinite;
+  }
+
+  @keyframes qa-radial-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+
+/* CodeMirror fills its pane and reads as a plain writing surface. */
+.qa-document-editor .cm-editor {
+  height: 100%;
+}
+
+.qa-document-editor .cm-scroller {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 1rem;
+  line-height: 1.6;
+  padding: 0.5rem 1rem;
+}
+
+.qa-document-editor .cm-focused {
+  outline: none;
+}

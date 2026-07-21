@@ -8,7 +8,13 @@ export type DialogKind = "menu" | "help" | "load" | "history";
 export type Panel = "chat" | "document";
 export type ListeningState = "listening" | "paused" | "muted";
 export type Author = "user" | "ai";
-export type VersionKind = "create" | "edit" | "restore" | "rename";
+export type VersionKind =
+  | "create"
+  | "edit"
+  | "restore"
+  | "rename"
+  | "undo"
+  | "redo";
 
 /** One line-level change, for display in the history list and chat log. */
 export interface DiffHunk {
@@ -88,18 +94,41 @@ export interface Settings {
   sfxEnabled: boolean;
   silenceThresholdMs: number;
   optimisticSendMs: number;
+  chatCompactThreshold: number; // messages since checkpoint before we summarize
 }
 
 export interface AppState {
   activeDocument: ActiveDocument | null;
   documents: DocumentMeta[];
-  history: Version[]; // versions for the active document, oldest-first
+  history: Version[]; // versions for the active document, oldest-first (append-only audit log)
+
+  /**
+   * Undo timeline. `undoStack` is the ordered list of version IDs reachable by
+   * undo/redo (a subsequence of `history` -- forward edits push onto it; undo/redo
+   * moves the cursor without pushing). `undoCursor` indexes the version the
+   * document currently reflects. A new edit made while the cursor is behind the
+   * tip truncates the redo tail from the stack (the discarded versions remain in
+   * the append-only `history` for audit). This is what makes repeated undos walk
+   * backward through the timeline instead of cycling between two states.
+   */
+  undoStack: string[];
+  undoCursor: number; // -1 when no document is open
+
   openDialog: DialogKind | null;
   activePanel: Panel;
   listening: ListeningState;
   documentScroll: ScrollState;
   chatScroll: ScrollState;
+
   chat: ChatEntry[];
+  /** Compacted summary of chat entries before the checkpoint, so early
+   * instructions (e.g. "write in this style") survive out of the raw window. */
+  chatSummary: string;
+  /** How many leading chat entries are folded into chatSummary. Entries after
+   * this index are sent to the LLM verbatim. Advanced by the edge when it
+   * periodically summarizes older chat. */
+  chatSummarizedCount: number;
+
   settings: Settings;
 }
 
@@ -131,6 +160,7 @@ export type Effect =
     }
   | { type: "set_listening"; state: ListeningState }
   | { type: "copy_to_clipboard"; text: string }
+  | { type: "export_document"; documentId: string; format: "md" | "docx" }
   | { type: "play_sfx"; sound: SfxSound }
   | { type: "persist_settings"; settings: Settings }
   | { type: "download_diagnostics"; documentId: string };
@@ -141,6 +171,7 @@ export const defaultSettings: Settings = {
   sfxEnabled: true,
   silenceThresholdMs: 800,
   optimisticSendMs: 400,
+  chatCompactThreshold: 24,
 };
 
 export const emptyScroll: ScrollState = {
@@ -155,12 +186,16 @@ export function initialState(overrides: Partial<AppState> = {}): AppState {
     activeDocument: null,
     documents: [],
     history: [],
+    undoStack: [],
+    undoCursor: -1,
     openDialog: null,
     activePanel: "document",
     listening: "muted",
     documentScroll: { ...emptyScroll },
     chatScroll: { ...emptyScroll },
     chat: [],
+    chatSummary: "",
+    chatSummarizedCount: 0,
     settings: { ...defaultSettings },
     ...overrides,
   };

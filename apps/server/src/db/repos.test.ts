@@ -1,0 +1,192 @@
+import { describe, it, expect } from "vitest";
+import { createVersion } from "@yammer/core";
+import { defaultSettings, type Version } from "@yammer/shared";
+import { createTestDb, seedUser } from "../test-support";
+
+async function nextVersion(
+  repos: ReturnType<typeof createTestDb>["repos"],
+  userId: string,
+  documentId: string,
+  newText: string,
+): Promise<Version> {
+  const parent = await repos.versions
+    .listForDocument(userId, documentId)
+    .then((vs) => vs[vs.length - 1]!);
+  return createVersion({
+    id: `v-${newText}`,
+    createdAt: new Date().toISOString(),
+    documentId,
+    parent,
+    author: "ai",
+    kind: "edit",
+    newText,
+    summary: `set to ${newText}`,
+  });
+}
+
+describe("UsersRepo", () => {
+  it("creates a user with default settings and finds it by id and googleSub", async () => {
+    const { repos } = createTestDb();
+    const user = await repos.users.create({
+      googleSub: "g-1",
+      email: "a@b.c",
+      name: "Ada",
+    });
+    expect(user.settings).toEqual(defaultSettings);
+    expect((await repos.users.findById(user.id))?.email).toBe("a@b.c");
+    expect((await repos.users.findByGoogleSub("g-1"))?.id).toBe(user.id);
+    expect(await repos.users.findByGoogleSub("nope")).toBeNull();
+  });
+});
+
+describe("DocumentsRepo", () => {
+  it("creates a document with an empty seq-0 create version and reads it back", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Notes" });
+    expect(doc.text).toBe("");
+    expect(doc.currentSeq).toBe(0);
+
+    const versions = await repos.versions.listForDocument(user.id, doc.id);
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.kind).toBe("create");
+    expect(versions[0]!.seq).toBe(0);
+
+    const fetched = await repos.documents.get(user.id, doc.id);
+    expect(fetched?.name).toBe("Notes");
+    expect(fetched?.currentVersionId).toBe(doc.currentVersionId);
+  });
+
+  it("lists documents sorted by name ascending and updated descending", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const beta = await repos.documents.create(user.id, { name: "Beta" });
+    await repos.documents.create(user.id, { name: "Alpha" });
+
+    const byName = await repos.documents.list(user.id, "name");
+    expect(byName.map((d) => d.name)).toEqual(["Alpha", "Beta"]);
+
+    // Touch Beta so it becomes most-recently-updated.
+    await repos.documents.rename(user.id, beta.id, "Beta2");
+    const byUpdated = await repos.documents.list(user.id, "updated");
+    expect(byUpdated[0]!.name).toBe("Beta2");
+  });
+
+  it("finds a document by name and renames it", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Draft" });
+    expect((await repos.documents.findByName(user.id, "Draft"))?.id).toBe(doc.id);
+    const renamed = await repos.documents.rename(user.id, doc.id, "Final");
+    expect(renamed.name).toBe("Final");
+    expect(await repos.documents.findByName(user.id, "Draft")).toBeNull();
+  });
+});
+
+describe("VersionsRepo append advances the document head", () => {
+  it("appending a version updates the document's current text and seq", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+
+    const v1 = await nextVersion(repos, user.id, doc.id, "hello");
+    await repos.versions.append(user.id, v1);
+
+    const after = await repos.documents.get(user.id, doc.id);
+    expect(after?.text).toBe("hello");
+    expect(after?.currentSeq).toBe(1);
+    expect(after?.currentVersionId).toBe(v1.id);
+
+    const history = await repos.versions.listForDocument(user.id, doc.id);
+    expect(history.map((v) => v.seq)).toEqual([0, 1]);
+  });
+});
+
+describe("TurnsRepo", () => {
+  it("appends turns and lists them oldest-first for a document", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+
+    await repos.turns.append(user.id, {
+      id: "t1",
+      userId: user.id,
+      documentId: doc.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      transcript: "add a title",
+      sttMeta: { seconds: 2 },
+      llmModel: "gpt-5.6-luna",
+      llmRawResponse: { ok: true },
+      actions: [{ type: "insert_text" }],
+      chatMessage: "done",
+      usage: { sttSeconds: 2, inputTokens: 100, cachedInputTokens: 0, outputTokens: 20 },
+    });
+
+    const turns = await repos.turns.listForDocument(user.id, doc.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.transcript).toBe("add a title");
+    expect(turns[0]!.usage.inputTokens).toBe(100);
+    expect(turns[0]!.actions).toEqual([{ type: "insert_text" }]);
+  });
+});
+
+describe("SettingsRepo", () => {
+  it("reads defaults and persists an update", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    expect(await repos.settings.get(user.id)).toEqual(defaultSettings);
+
+    const updated = { ...defaultSettings, theme: "dark" as const, sfxEnabled: false };
+    await repos.settings.update(user.id, updated);
+    expect((await repos.settings.get(user.id)).theme).toBe("dark");
+    expect((await repos.settings.get(user.id)).sfxEnabled).toBe(false);
+  });
+});
+
+describe("per-user isolation (a hard invariant)", () => {
+  it("scopes documents, versions, turns, and settings to their owner", async () => {
+    const { repos } = createTestDb();
+    const alice = await seedUser(repos, { name: "Alice" });
+    const bob = await seedUser(repos, { name: "Bob" });
+
+    const aliceDoc = await repos.documents.create(alice.id, { name: "Alice Doc" });
+    await repos.versions.append(
+      alice.id,
+      await nextVersion(repos, alice.id, aliceDoc.id, "secret text"),
+    );
+    await repos.turns.append(alice.id, {
+      id: "at1",
+      userId: alice.id,
+      documentId: aliceDoc.id,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      transcript: "alice only",
+      sttMeta: null,
+      llmModel: "gpt-5.6-luna",
+      llmRawResponse: null,
+      actions: [],
+      usage: { sttSeconds: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+    });
+
+    // Bob sees none of Alice's data.
+    expect(await repos.documents.list(bob.id, "updated")).toEqual([]);
+    expect(await repos.documents.get(bob.id, aliceDoc.id)).toBeNull();
+    expect(await repos.documents.findByName(bob.id, "Alice Doc")).toBeNull();
+    expect(await repos.versions.listForDocument(bob.id, aliceDoc.id)).toEqual([]);
+    expect(await repos.turns.listForDocument(bob.id, aliceDoc.id)).toEqual([]);
+    expect(await repos.versions.get(bob.id, `v-secret text`)).toBeNull();
+
+    // Alice still sees her own.
+    expect((await repos.documents.get(alice.id, aliceDoc.id))?.text).toBe("secret text");
+    expect(await repos.turns.listForDocument(alice.id, aliceDoc.id)).toHaveLength(1);
+  });
+
+  it("does not let one user rename another user's document", async () => {
+    const { repos } = createTestDb();
+    const alice = await seedUser(repos);
+    const bob = await seedUser(repos);
+    const doc = await repos.documents.create(alice.id, { name: "Alice Doc" });
+
+    await expect(repos.documents.rename(bob.id, doc.id, "Hijacked")).rejects.toThrow();
+    expect((await repos.documents.get(alice.id, doc.id))?.name).toBe("Alice Doc");
+  });
+});

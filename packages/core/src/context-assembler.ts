@@ -4,12 +4,6 @@ import type { AppState, ChatEntry, SituationalContext } from "@yammer/shared";
 // Pure and data-only so it is trivially unit-testable; the server renders it
 // into the user message.
 
-const DEFAULT_RECENT_CHAT = 12;
-
-export interface AssembleOptions {
-  recentChatLimit?: number;
-}
-
 function numberLines(text: string): string {
   const lines = text.length ? text.split("\n") : [""];
   const width = String(lines.length).length;
@@ -71,12 +65,7 @@ function dialogContents(state: AppState): string {
   }
 }
 
-export function assembleContext(
-  state: AppState,
-  opts: AssembleOptions = {},
-): SituationalContext {
-  const recentLimit = opts.recentChatLimit ?? DEFAULT_RECENT_CHAT;
-
+export function assembleContext(state: AppState): SituationalContext {
   const doc = state.activeDocument;
   return {
     document: doc
@@ -97,7 +86,10 @@ export function assembleContext(
       : null,
     activePanel: state.activePanel,
     listening: state.listening,
-    recentChat: state.chat.slice(-recentLimit).map(chatText),
+    chatSummary: state.chatSummary,
+    // Everything since the checkpoint, verbatim. The checkpoint (chatSummarizedCount)
+    // advances as the edge folds older chat into chatSummary, bounding this window.
+    recentChat: state.chat.slice(state.chatSummarizedCount).map(chatText),
     historySummary: summarizeHistory(state),
   };
 }

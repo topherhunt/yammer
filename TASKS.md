@@ -1,5 +1,3 @@
 
 - [ ] Rename folder to yammer
-- [ ] Please ensure that if the user issues multiple undos, like says like undo the last three actions, or you know, issues one undo and then issues a second undo, it will understand the semantics of that. Like, undos should ideally be appending further to the state, but only if we can keep a pointer of what further undos might followingly be applied. Does this make sense? Like we want to make sure that issuing repeated undos doesn't just cycle between the two most recent states. 
-- [ ] We'll need to also support these actions via the Menu and voice-actions: "Download as .md", "Download as .docx" (Are there good simple tools to convert a markdown into a simple, cleanly formatted docx?)
-- [ ] in the plan's Situational Context section, "the recent chat transcript" is not enough; The LLM also needs a condensed or compacted summary of the entire chat transcript up to a recent moment in time. And then after that checkpoint, it's just the full messages transcript. So if you're 30 messages in, the LLM should never just completely point blank forget that you instructed it to speak in a certain style in the second message. That information should be retained in a condensed format, which means we need the AI to periodically digest and summarize its own chat transcript history or something. 
+- [ ] 
