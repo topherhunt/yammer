@@ -211,21 +211,31 @@ States: `idle -> listening (pulsing on VAD) -> finalizing (radial progress durin
 - **Pulse** at the bottom of the chat sidebar reacts to VAD (`onVad`), showing audio is being captured.
 - On silence, a **radial progress bar** runs during (a) STT finalization and (b) a short pre-send grace window during which resumed speech cancels the send ("optimistic STT"). Barge-in cancels cleanly.
 - Endpointing: the Realtime API's server-side turn detection (semantic/silence VAD) signals end-of-utterance, tuned by a configurable silence threshold. A client-side VAD (Silero WASM, e.g. `@ricky0123/vad-web`) additionally drives the pulse indicator immediately without waiting on the network, and gates when we open the audio stream (so we don't stream/charge for pure silence).
+
+### Auditory feedback (SFX)
+Because he's watching the document, not the indicator, sound carries the state changes:
+- **Send** -- a short beep / slot-click the instant end-of-speech is detected and the transcript is dispatched to the LLM. Confirms "I heard you and I'm working on it," so he isn't left wondering.
+- **State changes** -- distinct tones for soft-mute, hard-mute, and unmute; unmute (listening re-activated) gets a brighter, rising beep / xylophone note so "you're live again" is unmistakable vs "you're muted." Muting gets a lower/falling tone.
+- Short, non-intrusive, and behind a volume/mute-SFX setting. Preloaded audio buffers so there's no playback lag.
+
 ### Enabling the mic (the first-interaction gate)
-Browsers require a user gesture before `getUserMedia`, so the app opens on a **full-screen "Tap to start listening" gate** (big centered button). One tap/click grants mic permission and starts continuous listening; from then on the mic never stops while the tab is foregrounded. On backgrounding (browsers may suspend audio), we pause and show the gate again on refocus. This gate is the single required physical interaction.
+Browsers require a user gesture before `getUserMedia`, so the app opens on a **full-screen "Tap to start listening" gate** (big centered button). One tap/click grants mic permission and starts continuous listening; from then on the mic never stops while the tab is foregrounded. This gate is the single required physical interaction.
+
+### Backgrounding / multi-tab
+Via the Page Visibility API, when the tab is backgrounded or the user switches away we **stop the mic** (release capture, pause the wake-word spotter); on refocus we **resume automatically**. Because the origin already holds mic permission for the session, resuming needs no fresh tap -- this is standard, non-suspicious behavior browsers permit (unlike trying to *acquire* the mic in the background, which they block). Only the foregrounded tab listens, so multi-device / multi-tab never double-captures.
 
 ### Three listening states (stop / pause / mute)
 1. **Listening (default):** continuous capture, streaming speech to STT, acting on it.
-2. **Paused (soft stop -- hands-free resume):** we stop streaming to cloud STT and stop acting (no cost, nothing leaves the device), but keep a local **Porcupine wake-word** spotter running. Saying the wake word (e.g. "Hey Yammer") resumes full listening -- no click needed. This is the default target state for "stop listening," because it preserves hands-free operation.
+2. **Paused (soft stop -- hands-free resume):** we stop streaming to cloud STT and stop acting (no cost, nothing leaves the device), but keep a local **Porcupine wake-word** spotter running. Saying the wake phrase **"Yammer, wake up"** resumes full listening -- no click needed. This is the default target state for "stop listening," because it preserves hands-free operation.
 3. **Muted (hard stop):** the mic track is fully released. Restarting requires a physical tap (browser gesture rule) -- used only when the user genuinely wants the mic off.
 
 The mic button reflects state: live/pulsing when listening, gray with an "idle" indicator when paused/muted. Clicking it toggles.
 
-### Stopping is AI-interpreted, not a memorized command
-Stopping never requires an exact phrase. Whatever the user says goes to the LLM, which infers intent -- "hold on, I'm talking to my wife," "give me a sec," "quit listening" all resolve to a `set_listening: 'paused'` action. There is no Siri-style incantation to remember. (Risk: a false-positive stop could strand the user; mitigated because the wake word instantly resumes, and we can require the stop-intent to be reasonably unambiguous.)
+### Stopping is AI-interpreted, but must be an explicit intent
+Stopping never requires an exact memorized phrase -- whatever the user says goes to the LLM, which infers intent: "stop listening," "stop recording," "Yammer, pause the mic," "hold on, I'm talking to my wife" all resolve to a `set_listening: 'paused'` action. But the system prompt requires the intent to be **explicit and unambiguous**: a bare "stop" mid-sentence, or the word appearing inside dictated content, must **not** pause. The bar is "did he clearly signal he wants the mic to disregard him," not "did he say a keyword." This deliberately errs cautious (false-negative over false-positive), because the wake phrase makes recovery instant if he does get ignored, whereas a wrongful pause mid-thought is disruptive. Stop-intent cases go in the golden eval set.
 
 ### Restart-from-pause is the one fixed phrase (and that's inherent)
-Resuming from **paused** is the sole asymmetry: while paused we send nothing to the LLM, so we can't AI-interpret an arbitrary "okay, continue" -- something has to be listening locally for free. That something is the on-device Porcupine wake-word spotter, which matches a fixed phrase. So: **stop = any wording (LLM-interpreted); resume-from-pause = the wake word (local) or a click.** Answering your question directly: yes, a hands-free wake word is entirely doable in-browser (Porcupine WASM, the same local-spotter pattern Siri/Alexa use), so he will not be forced back to the cursor to resume -- unless he chose full **mute**, which by definition needs a tap. We'll let you pick the wake phrase.
+Resuming from **paused** is the sole asymmetry: while paused we send nothing to the LLM, so we can't AI-interpret an arbitrary "okay, continue" -- something has to be listening locally for free. That something is the on-device Porcupine wake-word spotter matching the fixed phrase **"Yammer, wake up."** So: **stop = any explicit wording (LLM-interpreted); resume-from-pause = "Yammer, wake up" (local) or a click.** A hands-free wake word is entirely doable in-browser (Porcupine WASM, the same local-spotter pattern Siri/Alexa use), so he is never forced back to the cursor to resume -- unless he chose full **mute**, which by definition needs a tap.
 
 ---
 
@@ -310,15 +320,21 @@ Rationale:
 
 ## 12. My open questions / decisions needed before it's safe to build
 
-**Resolved:** hosted multi-user web app + Google auth + Postgres, multi-device sync (§4). Keys: OpenAI/Anthropic/OpenRouter available. Devices: desktop Chrome/Safari + iOS Chrome/Safari (mobile first-class). Models: Luna dev / Terra prod, no auto-failover for now -- stay single-family for parity, revisit Sonnet/Claude 5 Haiku later (§11). STT: `gpt-realtime-whisper` streaming (§7). Mic UX: tap-to-start gate + listen/pause/mute with local wake-word resume, AI-interpreted stop (§7). Correction: fading edit highlights, corrections-as-next-edit (§9). Destructive actions: append-only history + spoken undo, no confirmation (§4). Research: DIY pipeline, default Tavily, summarize-to-notebook (§8). Hosting: Racknerd VPS + Caddy + a new DB on the existing Postgres (§15). Live-API test tier with cost cap (§10).
+**All major decisions are now resolved -- nothing blocks the build.** For the record:
 
-Still genuinely open, ordered by how much they change what we build:
+- Hosted multi-user web app + Google auth + Postgres, multi-device sync (§4).
+- Keys available: OpenAI / Anthropic / OpenRouter.
+- Devices: desktop Chrome/Safari + iOS Chrome/Safari (mobile first-class).
+- Models: **Luna dev / Terra prod**, no auto-failover for now -- single-family for parity, revisit Sonnet / Claude 5 Haiku later (§11).
+- STT: **`gpt-realtime-whisper` streaming** -- latency prioritized, cost is a non-concern (§7).
+- Mic UX: tap-to-start gate; listen/pause/mute; local **"Yammer, wake up"** wake-word resume (Picovoice Porcupine OK); **explicit, cautious** AI-interpreted stop; pause-on-background/resume-on-foreground; send + mute/unmute SFX (§7).
+- Correction: fading edit highlights, corrections-as-next-edit (§9).
+- Destructive actions: append-only history + spoken undo, no confirmation (§4).
+- Research: DIY pipeline, **Tavily**, summarize-to-notebook (§8).
+- Hosting: Racknerd VPS + Caddy + a new DB on the existing Postgres (§15).
+- Testing: mocked default suite + opt-in live-API tier with per-run cost accounting and a hard budget cap (§10).
 
-1. **Wake phrase.** What word/phrase should resume-from-pause? (Porcupine works best with a distinct 2-3 syllable phrase; "Yammer" alone may false-trigger during dictation -- something like "Hey Yammer" or "Okay Yammer" is safer.) Also: Porcupine's free tier is fine for personal use, but confirm you're OK adding Picovoice as a dependency (there are open-alternatives if not).
-2. **Stop-intent false positives.** How aggressive should the "stop listening" inference be? Too eager and normal dictation containing "stop" pauses him mid-sentence; too cautious and he can't stop when a visitor arrives. I lean cautious + instant wake-word recovery. Any preference on erring one way?
-3. **Research provider key.** Tavily (default) vs Exa -- do you have/prefer either? Both free at your volume; I'll wire Tavily unless you say otherwise.
-4. **STT streaming vs cheaper batch.** Default to `gpt-realtime-whisper` streaming ($0.017/min) for snappy UX, or start with `gpt-4o-transcribe` batch ($0.006/min, ~3x cheaper) and accept slightly higher latency? I lean streaming; with VAD-gating we only pay for real speech.
-5. **Mic while backgrounded / multi-tab.** Acceptable that listening pauses when the tab isn't foregrounded (and multi-device means only the active tab listens)? I assume yes.
+**Residual small choices, all deferrable (none block Phases 0-3):** exact SFX sound design; the concrete Caddyfile/port mapping (settled at deploy time against your existing setup); whether to rename the repo directory from `yadda` to `yammer` (cosmetic). Longest-lived *risk* to keep watching is command-vs-dictation ambiguity (§14), which the golden eval set exists to catch.
 
 ---
 
