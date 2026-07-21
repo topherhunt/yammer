@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import type { LlmProvider, SearchProvider } from "@yammer/shared";
+import type { LlmProvider, SearchProvider, Version } from "@yammer/shared";
 import type { Repos, User } from "../db/repos";
 import {
   clearSessionCookie,
@@ -156,6 +156,60 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     const doc = await repos.documents.get(user.id, id);
     if (!doc) return c.json({ error: "not found" }, 404);
     return c.json({ versions: await repos.versions.listForDocument(user.id, id) });
+  });
+
+  // The client is authoritative: it applies the reducer, then persists the
+  // resulting Version here. Append-only + idempotent, so client retries are safe.
+  app.post("/api/documents/:id/versions", async (c) => {
+    const user = requireUser(c);
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => null)) as {
+      version?: unknown;
+      undoStack?: unknown;
+      undoCursor?: unknown;
+    } | null;
+
+    const version = body?.version as Version | undefined;
+    if (
+      !version ||
+      typeof version !== "object" ||
+      typeof version.id !== "string" ||
+      typeof version.seq !== "number" ||
+      typeof version.documentId !== "string"
+    ) {
+      return c.json({ error: "version (with id, seq, documentId) is required" }, 400);
+    }
+    if (version.documentId !== id) {
+      return c.json({ error: "version.documentId does not match the URL" }, 400);
+    }
+
+    // Ownership: 404 for a document that isn't the caller's (or doesn't exist).
+    const doc = await repos.documents.get(user.id, id);
+    if (!doc) return c.json({ error: "not found" }, 404);
+
+    // Idempotent: a version already stored under this id is a no-op success, so a
+    // client retry after a dropped response never errors or double-appends.
+    const existing = await repos.versions.get(user.id, version.id);
+    if (existing) return c.json({ version: existing });
+
+    // Append-only + monotonic: the new version must be exactly head + 1. A gap or a
+    // seq already used by a DIFFERENT id (seq <= head) is a conflict, not an append.
+    if (version.seq !== doc.currentSeq + 1) {
+      return c.json(
+        {
+          error: `seq conflict: expected ${doc.currentSeq + 1}, got ${version.seq}`,
+          expectedSeq: doc.currentSeq + 1,
+        },
+        409,
+      );
+    }
+
+    const undo =
+      Array.isArray(body?.undoStack) && typeof body?.undoCursor === "number"
+        ? { undoStack: body.undoStack as string[], undoCursor: body.undoCursor }
+        : undefined;
+    const saved = await repos.versions.append(user.id, version, undo);
+    return c.json({ version: saved }, 201);
   });
 
   app.get("/api/documents/:id/export", async (c) => {

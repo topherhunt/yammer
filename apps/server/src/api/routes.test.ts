@@ -1,7 +1,10 @@
 import { beforeAll, describe, it, expect } from "vitest";
-import type { AppState } from "@yammer/shared";
+import type { AppState, SituationalContext, Version } from "@yammer/shared";
 import { initialState } from "@yammer/shared";
+import { assembleContext } from "@yammer/core";
+import { eq } from "drizzle-orm";
 import { buildApp } from "../app";
+import { documents } from "../db/schema";
 import {
   authHeaders,
   createTestDb,
@@ -28,6 +31,32 @@ function stateForDoc(doc: {
   currentSeq: number;
 }): AppState {
   return initialState({ activeDocument: { ...doc } });
+}
+
+/** The situational-context payload the client sends with a turn (thin relay). */
+function contextForDoc(doc: {
+  id: string;
+  name: string;
+  text: string;
+  currentVersionId: string;
+  currentSeq: number;
+}): SituationalContext {
+  return assembleContext(stateForDoc(doc));
+}
+
+/** A minimal edit Version appended by the client after applying the reducer. */
+function editVersion(overrides: Partial<Version> & { documentId: string; seq: number }): Version {
+  return {
+    id: `v-${overrides.seq}`,
+    parentVersionId: null,
+    author: "ai",
+    kind: "edit",
+    summary: "edited",
+    fullText: "",
+    diff: [],
+    createdAt: "2026-02-02T00:00:00.000Z",
+    ...overrides,
+  };
 }
 
 describe("auth guard", () => {
@@ -130,8 +159,8 @@ describe("settings", () => {
   });
 });
 
-describe("POST /api/turn", () => {
-  it("applies an insert_text action, persists a version + turn, and returns the delta", async () => {
+describe("POST /api/turn (thin relay)", () => {
+  it("relays the raw LLM envelope + usage and does NOT itself apply or persist a version", async () => {
     const { repos } = createTestDb();
     const user = await seedUser(repos);
     const doc = await repos.documents.create(user.id, { name: "Doc" });
@@ -139,6 +168,7 @@ describe("POST /api/turn", () => {
       llmResult([{ type: "insert_text", position: "end", text: "Hello world" }], {
         chatMessage: "Added your sentence.",
         usage: { inputTokens: 200, cachedInputTokens: 50, outputTokens: 12 },
+        raw: { model_said: "hi" },
       }),
     ]);
     const app = buildApp({ repos, llm, search: new FakeSearch() });
@@ -146,53 +176,86 @@ describe("POST /api/turn", () => {
     const res = await app.request("/api/turn", {
       method: "POST",
       headers: jsonHeaders(user.id),
-      body: JSON.stringify({ transcript: "add hello world", state: stateForDoc(doc), sttSeconds: 3 }),
+      body: JSON.stringify({
+        transcript: "add hello world",
+        context: contextForDoc(doc),
+        documentId: doc.id,
+        sttSeconds: 3,
+      }),
     });
     expect(res.status).toBe(200);
     const out = (await res.json()) as {
       chatMessage: string;
       actions: { type: string }[];
-      state: AppState;
       usage: { sttSeconds: number; inputTokens: number };
+      raw: { model_said: string };
+      state?: unknown;
     };
+    // Raw, UNvalidated actions come straight back for the client to apply.
     expect(out.chatMessage).toBe("Added your sentence.");
     expect(out.actions[0]!.type).toBe("insert_text");
-    expect(out.state.activeDocument!.text).toBe("Hello world");
+    expect(out.raw.model_said).toBe("hi");
     expect(out.usage).toEqual({ sttSeconds: 3, inputTokens: 200, cachedInputTokens: 50, outputTokens: 12 });
+    // The relay does not run the reducer, so there is no applied state delta.
+    expect(out.state).toBeUndefined();
 
-    // Version persisted (seq 1) and the document head advanced in the DB.
+    // The relay persists NO version -- only the seq-0 create remains, head unchanged.
     const versions = await repos.versions.listForDocument(user.id, doc.id);
-    expect(versions.map((v) => v.seq)).toEqual([0, 1]);
-    expect((await repos.documents.get(user.id, doc.id))?.text).toBe("Hello world");
+    expect(versions.map((v) => v.seq)).toEqual([0]);
+    expect((await repos.documents.get(user.id, doc.id))?.text).toBe("");
 
-    // Turn persisted with transcript + usage for the spend meter.
+    // A diagnostic Turn IS logged for the owned document (chat sidebar + spend meter).
     const turns = await repos.turns.listForDocument(user.id, doc.id);
     expect(turns).toHaveLength(1);
     expect(turns[0]!.transcript).toBe("add hello world");
     expect(turns[0]!.usage.inputTokens).toBe(200);
+    expect(turns[0]!.chatMessage).toBe("Added your sentence.");
   });
 
-  it("surfaces an invalid model response as 422 and records a diagnostic turn", async () => {
+  it("still relays raw actions when the model output is invalid, logging [] actions", async () => {
+    // The client is authoritative and re-validates, so the relay does not 4xx on a
+    // bad envelope -- it hands the raw actions back and logs an empty action set.
     const { repos } = createTestDb();
     const user = await seedUser(repos);
     const doc = await repos.documents.create(user.id, { name: "Doc" });
-    const llm = new FakeLlm([llmResult([{ type: "not_a_real_action" }])]);
+    const llm = new FakeLlm([llmResult([{ type: "not_a_real_action" }], { raw: { junk: true } })]);
     const app = buildApp({ repos, llm, search: new FakeSearch() });
 
     const res = await app.request("/api/turn", {
       method: "POST",
       headers: jsonHeaders(user.id),
-      body: JSON.stringify({ transcript: "do something", state: stateForDoc(doc) }),
+      body: JSON.stringify({ transcript: "do something", context: contextForDoc(doc), documentId: doc.id }),
     });
-    expect(res.status).toBe(422);
-    expect(((await res.json()) as { error: string }).error).toMatch(/Invalid model response/);
+    expect(res.status).toBe(200);
+    const out = (await res.json()) as { actions: { type: string }[] };
+    expect(out.actions[0]!.type).toBe("not_a_real_action");
 
+    // The logged Turn records [] actions (parse failed) but keeps the raw response.
     const turns = await repos.turns.listForDocument(user.id, doc.id);
     expect(turns).toHaveLength(1);
     expect(turns[0]!.actions).toEqual([]);
+    expect(turns[0]!.llmRawResponse).toEqual({ junk: true });
   });
 
-  it("refuses a turn whose active document belongs to another user (404)", async () => {
+  it("returns 502 when the LLM provider throws", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const llm = new FakeLlm([]); // drained -> complete() throws
+    const app = buildApp({ repos, llm, search: new FakeSearch() });
+
+    const res = await app.request("/api/turn", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ transcript: "hi", context: contextForDoc(doc), documentId: doc.id }),
+    });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/LLM request failed/);
+    // Nothing was logged for a turn that never produced a response.
+    expect(await repos.turns.listForDocument(user.id, doc.id)).toHaveLength(0);
+  });
+
+  it("does not log a diagnostic Turn for a document the caller does not own", async () => {
     const { repos } = createTestDb();
     const alice = await seedUser(repos);
     const bob = await seedUser(repos);
@@ -203,11 +266,138 @@ describe("POST /api/turn", () => {
     const res = await app.request("/api/turn", {
       method: "POST",
       headers: jsonHeaders(bob.id),
-      body: JSON.stringify({ transcript: "edit it", state: stateForDoc(aliceDoc) }),
+      body: JSON.stringify({ transcript: "edit it", context: contextForDoc(aliceDoc), documentId: aliceDoc.id }),
+    });
+    expect(res.status).toBe(200);
+    // Per-user isolation: bob's relayed turn writes nothing to alice's diagnostics.
+    expect(await repos.turns.listForDocument(alice.id, aliceDoc.id)).toHaveLength(0);
+  });
+});
+
+describe("POST /api/documents/:id/versions (client-authoritative persistence)", () => {
+  it("appends the client's version and advances the document head", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const version = editVersion({
+      documentId: doc.id,
+      seq: 1,
+      parentVersionId: doc.currentVersionId,
+      fullText: "Hello world",
+      summary: "wrote hello",
+    });
+
+    const res = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version }),
+    });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { version: { id: string } }).version.id).toBe("v-1");
+
+    const head = await repos.documents.get(user.id, doc.id);
+    expect(head?.text).toBe("Hello world");
+    expect(head?.currentSeq).toBe(1);
+    expect(head?.currentVersionId).toBe("v-1");
+    expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
+  });
+
+  it("persists the client's undo timeline when supplied", async () => {
+    const { db, repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const version = editVersion({ documentId: doc.id, seq: 1, parentVersionId: doc.currentVersionId, fullText: "x" });
+    await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version, undoStack: [doc.currentVersionId, "v-1"], undoCursor: 1 }),
+    });
+
+    const rows = await db.select().from(documents).where(eq(documents.id, doc.id));
+    expect(rows[0]!.undoStack).toEqual([doc.currentVersionId, "v-1"]);
+    expect(rows[0]!.undoCursor).toBe(1);
+  });
+
+  it("is idempotent: re-posting the same version id is a no-op success", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const version = editVersion({ documentId: doc.id, seq: 1, parentVersionId: doc.currentVersionId, fullText: "once" });
+    const body = JSON.stringify({ version });
+
+    const first = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body,
+    });
+    expect(first.status).toBe(201);
+    const second = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body,
+    });
+    expect(second.status).toBe(200);
+    expect(((await second.json()) as { version: { fullText: string } }).version.fullText).toBe("once");
+
+    // No double-append: the history still has exactly seq 0 and 1.
+    expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
+  });
+
+  it("rejects a seq that is not head + 1 with 409 (reused seq under a different id)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: editVersion({ id: "v-a", documentId: doc.id, seq: 1, fullText: "a" }) }),
+    });
+
+    // A different id trying to claim seq 1 again (head is now 1) is a conflict.
+    const dup = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: editVersion({ id: "v-b", documentId: doc.id, seq: 1, fullText: "b" }) }),
+    });
+    expect(dup.status).toBe(409);
+
+    // A gap (seq 3 when head is 1) is likewise rejected.
+    const gap = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: editVersion({ id: "v-c", documentId: doc.id, seq: 3, fullText: "c" }) }),
+    });
+    expect(gap.status).toBe(409);
+
+    // Head is unchanged: only seq 0 and the first appended seq 1 survive.
+    expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
+  });
+
+  it("returns 404 when persisting to another user's document", async () => {
+    const { repos } = createTestDb();
+    const alice = await seedUser(repos);
+    const bob = await seedUser(repos);
+    const aliceDoc = await repos.documents.create(alice.id, { name: "Alice Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const res = await app.request(`/api/documents/${aliceDoc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(bob.id),
+      body: JSON.stringify({
+        version: editVersion({ documentId: aliceDoc.id, seq: 1, fullText: "hijack" }),
+      }),
     });
     expect(res.status).toBe(404);
-    // The LLM must not even be consulted for a document the caller cannot access.
-    expect(llm.requests).toHaveLength(0);
+    // Alice's history is untouched.
+    expect((await repos.versions.listForDocument(alice.id, aliceDoc.id)).map((v) => v.seq)).toEqual([0]);
   });
 });
 

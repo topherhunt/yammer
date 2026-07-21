@@ -81,7 +81,17 @@ export interface DocumentsRepo {
 export interface VersionsRepo {
   listForDocument(userId: string, documentId: string): Promise<Version[]>;
   get(userId: string, versionId: string): Promise<Version | null>;
-  append(userId: string, version: Version): Promise<Version>;
+  /**
+   * Append a version and advance the document head to it. When `undo` is given
+   * (the client persists its live undo timeline alongside the version), the
+   * document's undoStack/undoCursor are updated too; otherwise they are left
+   * untouched (append alone cannot distinguish a forward edit from an undo/redo).
+   */
+  append(
+    userId: string,
+    version: Version,
+    undo?: { undoStack: string[]; undoCursor: number },
+  ): Promise<Version>;
 }
 
 export interface TurnsRepo {
@@ -343,7 +353,7 @@ export function createRepos(db: Database): Repos {
       return rows[0] ? toVersion(rows[0]) : null;
     },
 
-    async append(userId, version) {
+    async append(userId, version, undo) {
       const inserted = await db
         .insert(versions)
         .values({
@@ -361,14 +371,19 @@ export function createRepos(db: Database): Repos {
           restoredFromVersionId: version.restoredFromVersionId ?? null,
         })
         .returning();
-      // The newly appended version becomes the document head. undoStack/undoCursor
-      // are NOT touched here (append cannot tell a forward edit from an undo/redo
-      // navigation); the client threads the live undo timeline within a session.
+      // The newly appended version becomes the document head (documents has no
+      // text column -- the ActiveDocument text is read from the head version's
+      // fullText). When the client supplies its undo timeline we persist it too;
+      // otherwise undoStack/undoCursor are left untouched (a bare append cannot
+      // tell a forward edit from an undo/redo navigation).
       await db
         .update(documents)
         .set({
           currentVersionId: version.id,
           updatedAt: version.createdAt,
+          ...(undo
+            ? { undoStack: undo.undoStack, undoCursor: undo.undoCursor }
+            : {}),
         })
         .where(
           and(

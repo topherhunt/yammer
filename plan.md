@@ -61,10 +61,13 @@ A web app where a person with severe motor impairment (ALS) can write, edit, AI-
    ┌─────────────────────────────────────────────────────────────────┐
    │ Backend (Hono) -- Google-auth session on every request           │
    │  - WS /api/stt: proxy mic audio -> OpenAI Realtime transcription │
-   │  - /api/turn: build system+user prompt, call LlmProvider,        │
-   │    validate structured Action[] against schema, persist Turn     │
+   │  - /api/turn: THIN RELAY -- build prompt, call LlmProvider,       │
+   │    return raw { chatMessage, actions, usage, raw }; log Turn.     │
+   │    (client validates + reduces + persists -- see below)          │
+   │  - POST /api/documents/:id/versions: append-only, idempotent,    │
+   │    seq-checked version persistence from the client                │
    │  - /api/research: web search + fetch + summarize (server-side)   │
-   │  - /api/documents, /api/versions, /api/settings, /api/diagnostics│
+   │  - /api/documents, /api/settings, /api/diagnostics, export        │
    │  - holds all API keys; nothing secret in the browser             │
    └───────────────┬─────────────────────────────────────────────────┘
                    │
@@ -74,6 +77,8 @@ A web app where a person with severe motor impairment (ALS) can write, edit, AI-
       │ turns, settings)       │        │ (provider abstraction)       │
       └────────────────────────┘        └──────────────────────────────┘
 ```
+
+**Turn architecture: client-authoritative reducer, thin relay server (decided).** The browser holds `AppState` and is the single place the reducer runs -- for both LLM turns and direct mouse/keyboard edits, which the app requires anyway, so there is exactly one reducer path and no double-apply risk. Each turn: the client assembles `SituationalContext` (via `@yammer/core`), POSTs `{transcript, context, documentId?}`; the server relays to the LLM and returns the raw `{chatMessage, actions, usage, raw}` (logging a diagnostic `Turn` row for an owned document); the client validates with `parseLlmResponse`, applies via `applyTurn`, executes effects, and persists each resulting version through the idempotent, seq-checked `POST /api/documents/:id/versions` endpoint. The server stays authoritative for seq numbering (enforced at append) so a stale/forged client can't corrupt history. Durability against lost work comes from awaited idempotent persistence (versions carry full snapshots + client UUIDs, so retries are safe).
 
 **The `packages/core` module is the star.** It contains, as pure functions with no I/O:
 - the Action type definitions + Zod schema (the contract),

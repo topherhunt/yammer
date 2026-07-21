@@ -55,8 +55,9 @@ export interface AppStore {
   /** Apply a validated LLM turn (author "ai") and record its usage. */
   applyResponse: (response: LlmResponse, usage?: Usage) => void;
   /** Send a finished transcript through the turn loop (append user message,
-   * call the LLM, validate, apply, record usage). */
-  submitTranscript: (text: string) => Promise<void>;
+   * call the LLM, validate, apply, record usage). `sttSeconds` is the utterance's
+   * audio length, folded into the turn usage server-side for the spend meter. */
+  submitTranscript: (text: string, sttSeconds?: number) => Promise<void>;
   setDocumentScroll: (scroll: ScrollState) => void;
   setChatScroll: (scroll: ScrollState) => void;
   /** Live text sync from direct keyboard editing (no version -- a dev
@@ -262,7 +263,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
 
       applyResponse,
 
-      async submitTranscript(text) {
+      async submitTranscript(text, sttSeconds) {
         const trimmed = text.trim();
         if (!trimmed) return;
         set((s) => ({
@@ -277,9 +278,15 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         }));
 
         const context = assembleContext(get().app);
+        const documentId = get().app.activeDocument?.id;
         let result;
         try {
-          result = await deps.api.turn({ transcript: trimmed, context });
+          result = await deps.api.turn({
+            transcript: trimmed,
+            context,
+            ...(documentId !== undefined ? { documentId } : {}),
+            ...(sttSeconds !== undefined ? { sttSeconds } : {}),
+          });
         } catch (err) {
           pushEntry({
             kind: "error",

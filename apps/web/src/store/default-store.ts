@@ -1,14 +1,17 @@
 import { createVersion } from "@yammer/core";
+import type { ApiClient } from "../api/client";
+import { FetchApiClient } from "../api/fetch-client";
 import { MockApiClient } from "../api/mock-client";
 import { MockStt } from "../stt/mock-stt";
 import { createAppStore } from "./store";
 import type { AppStore } from "./store";
 import type { StoreApi } from "zustand/vanilla";
 
-// The app's default store for local dev/demo. Until Phase 4 wires the real
-// gpt-realtime-whisper STT and a fetch-backed ApiClient, it runs entirely on
-// mocks with a small seed document and a canned "reword" turn response, so the
-// UI is explorable end to end without a backend or any spend.
+// The app's default store for local dev/demo. When VITE_API_BASE is set it talks
+// to the real backend via FetchApiClient; otherwise it runs entirely on mocks
+// with a small seed document and a canned "echo dictation" turn response, so the
+// UI is explorable end to end without a backend or any spend. STT is still mocked
+// until Phase 4 wires the real gpt-realtime-whisper pipeline.
 
 const seedId = "seed-doc";
 const seedText =
@@ -28,6 +31,15 @@ let singleton: StoreApi<AppStore> | null = null;
 
 export function getDefaultStore(): StoreApi<AppStore> {
   if (singleton) return singleton;
+
+  const apiBase = import.meta.env.VITE_API_BASE;
+  if (apiBase) {
+    // Real backend: the fetch client is authoritative-store-backed and carries the
+    // session cookie. No seed data -- documents come from the server.
+    const api: ApiClient = new FetchApiClient(apiBase);
+    singleton = createAppStore({ api, stt: new MockStt() });
+    return singleton;
+  }
 
   const api = new MockApiClient({
     documents: [

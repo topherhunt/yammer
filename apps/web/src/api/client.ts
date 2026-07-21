@@ -16,6 +16,12 @@ import type {
 export interface TurnRequest {
   transcript: string;
   context: SituationalContext;
+  /** The active document, so the server can log a diagnostic Turn against it. */
+  documentId?: string;
+  /** STT audio-seconds for this utterance, folded into the turn's usage. */
+  sttSeconds?: number;
+  /** Opaque STT provider metadata, persisted to the diagnostic log. */
+  sttMeta?: unknown;
 }
 
 /** A document plus its append-only version history, as returned by load/create. */
