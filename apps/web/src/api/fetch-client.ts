@@ -6,7 +6,8 @@ import type {
   SortKey,
   Version,
 } from "@yammer/shared";
-import type { ApiClient, DocumentPayload, TurnRequest } from "./client";
+import { ApiError } from "./client";
+import type { ApiClient, DocumentPayload, PersistUndo, TurnRequest } from "./client";
 
 // The real backend client: a thin HTTP wrapper over apps/server's routes. The
 // server is a THIN RELAY for turns and the authoritative store for documents;
@@ -40,7 +41,10 @@ export class FetchApiClient implements ApiClient {
       ...init,
     });
     if (!res.ok) {
-      throw new Error(`${init?.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}`);
+      throw new ApiError(
+        `${init?.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}`,
+        res.status,
+      );
     }
     return (await res.json()) as T;
   }
@@ -113,10 +117,15 @@ export class FetchApiClient implements ApiClient {
     );
   }
 
-  async persistVersion(version: Version): Promise<void> {
+  async persistVersion(version: Version, undo?: PersistUndo): Promise<void> {
+    const body: Record<string, unknown> = { version };
+    if (undo) {
+      body.undoStack = undo.undoStack;
+      body.undoCursor = undo.undoCursor;
+    }
     await this.requestJson(
       `/api/documents/${version.documentId}/versions`,
-      this.jsonInit("POST", { version }),
+      this.jsonInit("POST", body),
     );
   }
 

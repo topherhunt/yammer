@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createVersion } from "@yammer/core";
 import { defaultSettings, type Version } from "@yammer/shared";
 import { createTestDb, seedUser } from "../test-support";
+import { DuplicateNameError, isUniqueViolation } from "./repos";
 
 async function nextVersion(
   repos: ReturnType<typeof createTestDb>["repos"],
@@ -81,6 +82,41 @@ describe("DocumentsRepo", () => {
     expect(renamed.name).toBe("Final");
     expect(await repos.documents.findByName(user.id, "Draft")).toBeNull();
   });
+
+  it("rejects creating a case-insensitively duplicate name with DuplicateNameError", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    await repos.documents.create(user.id, { name: "Journal" });
+    await expect(
+      repos.documents.create(user.id, { name: "journal" }),
+    ).rejects.toBeInstanceOf(DuplicateNameError);
+    // The unique index is per-user: another user may reuse the same name.
+    const other = await seedUser(repos);
+    const otherDoc = await repos.documents.create(other.id, { name: "Journal" });
+    expect(otherDoc.name).toBe("Journal");
+  });
+
+  it("auto-disambiguates nameless documents so 'new document' never collides", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const a = await repos.documents.create(user.id, {});
+    const b = await repos.documents.create(user.id, {});
+    const c = await repos.documents.create(user.id, {});
+    expect([a.name, b.name, c.name]).toEqual(["Untitled", "Untitled 2", "Untitled 3"]);
+  });
+
+  it("rejects renaming a document onto another document's name (case-insensitively)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    await repos.documents.create(user.id, { name: "Journal" });
+    const notes = await repos.documents.create(user.id, { name: "Notes" });
+    await expect(
+      repos.documents.rename(user.id, notes.id, "JOURNAL"),
+    ).rejects.toBeInstanceOf(DuplicateNameError);
+    // A case-only rename of a document onto ITS OWN name is allowed.
+    const renamed = await repos.documents.rename(user.id, notes.id, "notes");
+    expect(renamed.name).toBe("notes");
+  });
 });
 
 describe("VersionsRepo append advances the document head", () => {
@@ -99,6 +135,42 @@ describe("VersionsRepo append advances the document head", () => {
 
     const history = await repos.versions.listForDocument(user.id, doc.id);
     expect(history.map((v) => v.seq)).toEqual([0, 1]);
+  });
+
+  it("refuses to append a version to a document owned by another user", async () => {
+    const { repos } = createTestDb();
+    const alice = await seedUser(repos);
+    const bob = await seedUser(repos);
+    const aliceDoc = await repos.documents.create(alice.id, { name: "Alice Doc" });
+
+    const v = await nextVersion(repos, alice.id, aliceDoc.id, "hijack");
+    // Bob tries to append against Alice's document -- the ownership assert throws
+    // before any row is written.
+    await expect(repos.versions.append(bob.id, v)).rejects.toThrow(/not found for this user/);
+    expect((await repos.versions.listForDocument(alice.id, aliceDoc.id)).map((x) => x.seq)).toEqual([0]);
+  });
+
+  it("rejects a second version reusing a seq with a UNIQUE(document_id, seq) violation", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+
+    const first = await nextVersion(repos, user.id, doc.id, "one");
+    await repos.versions.append(user.id, first);
+
+    // A different id reusing seq 1 (the concurrent-append race) must be rejected by
+    // the unique constraint, detectable as a 23505 for the route to map to 409.
+    const collision: Version = { ...first, id: "v-collision", fullText: "two" };
+    let caught: unknown;
+    try {
+      await repos.versions.append(user.id, collision);
+    } catch (e) {
+      caught = e;
+    }
+    expect(isUniqueViolation(caught)).toBe(true);
+    // The losing append wrote nothing: history + head are unchanged.
+    expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
+    expect((await repos.documents.get(user.id, doc.id))?.currentVersionId).toBe(first.id);
   });
 });
 

@@ -32,7 +32,7 @@ A web app where a person with severe motor impairment (ALS) can write, edit, AI-
 | Backend | **Hono** (on Node via `@hono/node-server`) | Yes, Hono is the modern pick you were reaching for: tiny, fast, first-class TS, runtime-portable. Express would also be fine; Hono wins on DX and types. |
 | LLM providers | Provider abstraction over **OpenAI direct** (GPT-5.6 family) primary; Anthropic + OpenRouter adapters behind the same seam | Decision: dev = **GPT-5.6 Luna**, prod = **GPT-5.6 Terra** (see §11). Same family = dev/prod parity on tool-calling + structured output. Model is a config string; other providers are drop-in via the adapter. |
 | STT (transcription) | **`gpt-realtime-whisper`** ($0.017/min, streaming) over a backend WebSocket, behind an `SttProvider` interface | This is the transcription-only streaming model -- NOT the pricey speech-to-speech `gpt-realtime-2.1` ($32/$64 per 1M audio tokens). Cheaper non-streaming alternatives (`gpt-4o-transcribe` $0.006/min, `gpt-4o-mini-transcribe` $0.003/min) are drop-in behind the same interface if we ever trade latency for cost. iOS/WebKit make Web Speech unreliable, so cloud STT is the cross-device default. See §7. |
-| Wake word (restart-from-pause) | **Picovoice Porcupine** (WASM, on-device) | Local, near-zero CPU, no audio leaves the device, no per-use cost. Enables hands-free "resume listening" without a click. See §7. |
+| Wake word (restart-from-pause) | **Vosk (`vosk-browser`)** (WASM, on-device) | Fully open-source (Apache-2.0), **keyless, no registration**, runs 100% locally in-browser -- no audio leaves the device, no per-use cost, works on iOS/WebKit. ~40MB model (cached); more CPU than a purpose-built spotter but fine for a single pause-time phrase. Enables hands-free "resume listening" without a click. See §7. (Chosen over Picovoice Porcupine specifically to avoid a key/registration.) |
 | Web search (research) | DIY pipeline behind a `SearchProvider` interface; default **Tavily** (or Exa) | We control the search -> pick -> fetch -> **summarize-to-notebook** flow ourselves rather than using the model's hosted `web_search` tool, so raw pages never bloat context and it stays provider-neutral. See §8. |
 | Persistence | **PostgreSQL** + Drizzle ORM + migrations | Hosted, multi-user, multi-device sync. A new database on the existing VPS Postgres (see §15). Per-user isolation. Append-only version/event tables fit naturally. |
 | Auth | **Google OAuth** (Sign in with Google) via Auth.js/Lucia-style session | One `users` row per Google login; all documents/history scoped to `userId`. HTTP-only session cookies. |
@@ -234,7 +234,7 @@ Via the Page Visibility API, when the tab is backgrounded or the user switches a
 
 ### Three listening states (stop / pause / mute)
 1. **Listening (default):** continuous capture, streaming speech to STT, acting on it.
-2. **Paused (soft stop -- hands-free resume):** we stop streaming to cloud STT and stop acting (no cost, nothing leaves the device), but keep a local **Porcupine wake-word** spotter running. Saying the wake phrase **"Yammer, wake up"** resumes full listening -- no click needed. This is the default target state for "stop listening," because it preserves hands-free operation.
+2. **Paused (soft stop -- hands-free resume):** we stop streaming to cloud STT and stop acting (no cost, nothing leaves the device), but keep a local **Vosk wake-word** spotter running (open-source, keyless, on-device). Saying the wake phrase **"Yammer, wake up"** resumes full listening -- no click needed. This is the default target state for "stop listening," because it preserves hands-free operation.
 3. **Muted (hard stop):** the mic track is fully released. Restarting requires a physical tap (browser gesture rule) -- used only when the user genuinely wants the mic off.
 
 The mic button reflects state: live/pulsing when listening, gray with an "idle" indicator when paused/muted. Clicking it toggles.
@@ -243,7 +243,7 @@ The mic button reflects state: live/pulsing when listening, gray with an "idle" 
 Stopping never requires an exact memorized phrase -- whatever the user says goes to the LLM, which infers intent: "stop listening," "stop recording," "Yammer, pause the mic," "hold on, I'm talking to my wife" all resolve to a `set_listening: 'paused'` action. But the system prompt requires the intent to be **explicit and unambiguous**: a bare "stop" mid-sentence, or the word appearing inside dictated content, must **not** pause. The bar is "did he clearly signal he wants the mic to disregard him," not "did he say a keyword." This deliberately errs cautious (false-negative over false-positive), because the wake phrase makes recovery instant if he does get ignored, whereas a wrongful pause mid-thought is disruptive. Stop-intent cases go in the golden eval set.
 
 ### Restart-from-pause is the one fixed phrase (and that's inherent)
-Resuming from **paused** is the sole asymmetry: while paused we send nothing to the LLM, so we can't AI-interpret an arbitrary "okay, continue" -- something has to be listening locally for free. That something is the on-device Porcupine wake-word spotter matching the fixed phrase **"Yammer, wake up."** So: **stop = any explicit wording (LLM-interpreted); resume-from-pause = "Yammer, wake up" (local) or a click.** A hands-free wake word is entirely doable in-browser (Porcupine WASM, the same local-spotter pattern Siri/Alexa use), so he is never forced back to the cursor to resume -- unless he chose full **mute**, which by definition needs a tap.
+Resuming from **paused** is the sole asymmetry: while paused we send nothing to the LLM, so we can't AI-interpret an arbitrary "okay, continue" -- something has to be listening locally for free. That something is the on-device Vosk wake-word spotter matching the phrase **"Yammer, wake up."** So: **stop = any explicit wording (LLM-interpreted); resume-from-pause = "Yammer, wake up" (local) or a click.** A hands-free wake word is entirely doable in-browser (a local WASM speech recognizer, the same local-spotter pattern Siri/Alexa use), so he is never forced back to the cursor to resume -- unless he chose full **mute**, which by definition needs a tap.
 
 ---
 
@@ -335,7 +335,7 @@ Rationale:
 - Devices: desktop Chrome/Safari + iOS Chrome/Safari (mobile first-class).
 - Models: **Luna dev / Terra prod**, no auto-failover for now -- single-family for parity, revisit Sonnet / Claude 5 Haiku later (§11).
 - STT: **`gpt-realtime-whisper` streaming** -- latency prioritized, cost is a non-concern (§7).
-- Mic UX: tap-to-start gate; listen/pause/mute; local **"Yammer, wake up"** wake-word resume (Picovoice Porcupine OK); **explicit, cautious** AI-interpreted stop; pause-on-background/resume-on-foreground; send + mute/unmute SFX (§7).
+- Mic UX: tap-to-start gate; listen/pause/mute; local **"Yammer, wake up"** wake-word resume (Vosk / `vosk-browser`, open-source + keyless); **explicit, cautious** AI-interpreted stop; pause-on-background/resume-on-foreground; send + mute/unmute SFX (§7).
 - Correction: fading edit highlights, corrections-as-next-edit (§9).
 - Destructive actions: append-only history + spoken undo, no confirmation (§4).
 - Research: DIY pipeline, **Tavily**, summarize-to-notebook (§8).
@@ -354,7 +354,7 @@ Each phase ends green (tests pass) and demoable.
 - **Phase 1 -- Core domain (pure, no UI).** AppState types, Action types + Zod schema, edit engine, version/history model, action reducer, context assembler. Heavy unit tests. **This is where most of the value and most of the tests live.**
 - **Phase 2 -- LLM turn loop.** `LlmProvider` + OpenAI/GPT-5.6 adapter (Luna) + mock provider, system prompt, `/api/turn`, structured-output validation, `Turn` persistence + usage capture. Drive the reducer from a mocked model end to end in tests.
 - **Phase 3 -- Frontend wiring.** CodeMirror document panel, chat sidebar, dialogs (menu/help/load/history), Zustand store, theme (system/light/dark), apply actions to real UI. Full mouse/keyboard operability. Playwright flows with mocked STT+LLM.
-- **Phase 4 -- Voice.** `SttProvider` + `gpt-realtime-whisper` WS proxy, tap-to-start gate, listen/pause/mute state machine, Porcupine wake-word resume, pulse + radial indicators, optimistic-send grace window, AI-interpreted stop. The first real "talk to it" build.
+- **Phase 4 -- Voice.** `SttProvider` + `gpt-realtime-whisper` WS proxy, tap-to-start gate, listen/pause/mute state machine, Vosk wake-word resume, pulse + radial indicators, optimistic-send grace window, AI-interpreted stop. The first real "talk to it" build.
 - **Phase 5 -- Research.** `/api/research` search (Tavily) + read + summarize-to-notebook, thinking-status streaming, `research` action.
 - **Phase 6 -- Polish + hardening.** STT-correction UX, spend meter, downloadable diagnostic log, accessibility pass, prompt-eval golden set, real-model tuning (incl. large-doc edit-accuracy eval for Luna), error surfacing, settings screen.
 
@@ -380,3 +380,29 @@ Deployed to an existing **Racknerd VPS** (ultra-budget), alongside other apps, f
 - **Secrets:** API keys (OpenAI, Tavily, Google OAuth client) live in server-side env on the VPS, never in the browser bundle.
 - **Deploy:** a lightweight script (you'll share your existing pattern from the other apps when we get there). Deployment is explicitly **later** -- not part of the initial build. Design keeps it a plain `node`-runnable server so it drops onto the box with minimal ceremony.
 - **Process/ports:** app listens on a local port; Caddy maps the public hostname to it. (Details TBD against your existing Caddyfile.)
+
+---
+
+## 16. Security & hardening backlog (deferred, by phase)
+
+From the multi-agent code review. The durability/correctness/cheap-safety items were fixed immediately (client persistence retry+reconcile, turn serialization, effect error surfacing, mic-freeze guard, applyInsert ambiguity, restore_fragment provenance, undo guards, diff OOM cap, UNIQUE(doc,seq) + FKs, research fan-out cap, body-size limit, repos 0-row guard, duplicate-name uniqueness). The following are deliberately deferred to the phase where they become testable end-to-end -- recorded here so they are not forgotten.
+
+**Voice phase -- STT bridge hardening: DONE.** Auth gate before opening upstream, max-duration / idle / byte-budget / oversized-frame / per-user-concurrency caps, and buffer-until-open are implemented and unit-tested against a fake upstream (`apps/server/src/stt/bridge.ts`, env knobs in `.env.example`). Remaining small follow-ups for the live STT tuning (in-browser, with a key):
+- `stop` currently `closeBoth("done")` immediately, which can drop a trailing final transcript. Flush/commit the last utterance before closing once real endpointing is wired.
+- The frozen `SttCloseReason` enum has no concurrency value, so an over-cap socket closes with `server_error`. Consider adding a dedicated reason (e.g. `too_many_sessions`) so the client can show a precise message.
+- Real end-to-end (actual OpenAI realtime socket in `upstream.ts` + the socket path in `upgrade.ts`) is untested by design -- verify in the opt-in live tier / a browser once keys are set.
+
+**Voice / correction-UX polish phase:**
+- Apply the reducer's actual per-edit ranges as discrete fading highlights (the current single-span diff over-highlights multi-region edits and collapses pure deletions to zero-width).
+- **Accessibility (high priority for an AT-dependent user):** `role="status"`/`aria-live` on the turn status and error entries so failures are announced; focus-trap + focus-restore in dialogs.
+- **Mic stream sharing:** the main capture and the Silero VAD currently open two separate `getUserMedia` streams during listening; share one `MediaStream` between them (TODO in `mic-capture.ts`).
+- **Voice error surfacing:** `WsSttClient` errors currently `console.error` in `create-voice.ts`; route them into the chat error log via a public store voice-error channel (pairs with the accessibility `aria-live` work so STT failures are announced).
+- **Wake-word footprint (Vosk is a stopgap, not ideal).** We chose Vosk (`vosk-browser`) for the wake word because it is open-source and keyless, but its ~40MB model download and general-ASR CPU cost are heavier than we'd like for a task as small as spotting one phrase. Ideally replace it with a **tiny, purpose-built, open-source keyword spotter** (Porcupine-class footprint without the key). Candidates to evaluate: **openWakeWord** (ONNX, custom-trainable, ~few-MB models; browser via `onnxruntime-web`) or a transfer-trained **TensorFlow.js `speech-commands`** model for "Yammer, wake up". Both need a small training/wiring effort, hence deferred; the `WakeWordDetector` interface makes the swap a drop-in.
+
+**Deploy-hardening phase (when the server goes live with real keys):**
+- Per-user rate limiting + a per-user/daily **spend ceiling** checked (sum `turns.usage`) before each external call. The spend meter is display-only today.
+- Session revocation: sessions are currently a stateless HMAC of `{uid,iat}` valid the full expiry regardless of logout. Add a `sessionVersion` in the user row (or a sessions table) so logout/compromise can revoke; consider a shorter expiry. Relevant for caregiver/shared-device use.
+- Consider a DB trigger/role denying `UPDATE`/`DELETE` on the append-only `versions`/`turns` tables (FKs added now cover referential integrity).
+
+**Accepted tradeoff (documented, not a bug):**
+- With the client-authoritative design, `/api/documents/:id/versions` trusts client-supplied version *content* (`fullText`, `author`, `kind`, `diff`). The server guarantees only monotonic seq + ownership + referential integrity, not that a version is a genuine reducer output. Acceptable for a single-user tool; revisit if the trust model ever changes.

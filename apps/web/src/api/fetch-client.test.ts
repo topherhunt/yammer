@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SituationalContext, Version } from "@yammer/shared";
 import { FetchApiClient } from "./fetch-client";
+import { ApiError } from "./client";
 
 // Drive FetchApiClient against a mocked global fetch: assert the URL, method,
 // credentials, and body it sends, plus how it maps each response. No real
@@ -178,6 +179,58 @@ describe("FetchApiClient.persistVersion", () => {
     expect(calls[0]!.method).toBe("POST");
     expect(calls[0]!.url).toBe("https://api.test/api/documents/d1/versions");
     expect(calls[0]!.body).toEqual({ version });
+  });
+
+  it("includes undoStack/undoCursor in the body when the undo timeline is passed (N3)", async () => {
+    const version: Version = {
+      id: "v2",
+      documentId: "d1",
+      seq: 2,
+      parentVersionId: "v1",
+      author: "ai",
+      kind: "edit",
+      summary: "edit",
+      fullText: "hi there",
+      diff: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const { calls } = stubFetch({ "POST /api/documents/d1/versions": { version } });
+    const client = new FetchApiClient(BASE);
+
+    await client.persistVersion(version, { undoStack: ["v0", "v1", "v2"], undoCursor: 2 });
+    expect(calls[0]!.body).toEqual({
+      version,
+      undoStack: ["v0", "v1", "v2"],
+      undoCursor: 2,
+    });
+  });
+
+  it("throws an ApiError carrying the numeric status on a non-2xx (for 409 branching)", async () => {
+    const fn = vi.fn(async () => ({ ok: false, status: 409, statusText: "Conflict" }) as Response);
+    vi.stubGlobal("fetch", fn);
+    const version: Version = {
+      id: "v1",
+      documentId: "d1",
+      seq: 1,
+      parentVersionId: "v0",
+      author: "ai",
+      kind: "edit",
+      summary: "edit",
+      fullText: "hi",
+      diff: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const client = new FetchApiClient(BASE);
+
+    await client.persistVersion(version).then(
+      () => {
+        throw new Error("expected persistVersion to reject");
+      },
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(ApiError);
+        expect((err as ApiError).status).toBe(409);
+      },
+    );
   });
 });
 

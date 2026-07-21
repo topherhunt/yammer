@@ -4,7 +4,7 @@ import { initialState } from "@yammer/shared";
 import { assembleContext } from "@yammer/core";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../app";
-import { documents } from "../db/schema";
+import { documents, versions } from "../db/schema";
 import {
   authHeaders,
   createTestDb,
@@ -114,6 +114,48 @@ describe("documents CRUD", () => {
 
     const res = await app.request(`/api/documents/${doc.id}`, { headers: authHeaders(bob.id) });
     expect(res.status).toBe(404);
+  });
+
+  it("rejects creating a document whose name duplicates an existing one (case-insensitive) with 409", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const first = await app.request("/api/documents", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ name: "Journal" }),
+    });
+    expect(first.status).toBe(201);
+
+    const dup = await app.request("/api/documents", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ name: "journal" }),
+    });
+    expect(dup.status).toBe(409);
+    expect(((await dup.json()) as { error: string }).error).toMatch(/already exists/);
+    // No duplicate was created -- the user still has exactly one document.
+    const list = await app.request("/api/documents", { headers: authHeaders(user.id) });
+    expect(((await list.json()) as { documents: unknown[] }).documents).toHaveLength(1);
+  });
+
+  it("rejects renaming a document onto another document's name (case-insensitive) with 409", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    await repos.documents.create(user.id, { name: "Journal" });
+    const notes = await repos.documents.create(user.id, { name: "Notes" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const res = await app.request(`/api/documents/${notes.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ name: "JOURNAL" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/already exists/);
+    // The rename did not take: "Notes" is unchanged.
+    expect((await repos.documents.get(user.id, notes.id))?.name).toBe("Notes");
   });
 });
 
@@ -399,6 +441,56 @@ describe("POST /api/documents/:id/versions (client-authoritative persistence)", 
     // Alice's history is untouched.
     expect((await repos.versions.listForDocument(alice.id, aliceDoc.id)).map((v) => v.seq)).toEqual([0]);
   });
+
+  it("maps a concurrent UNIQUE(document_id, seq) collision to the structured 409, not a 500", async () => {
+    const { db, repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    // Simulate a concurrent winner: a versions row already occupies (doc, seq 1) at
+    // the DB level, but the document HEAD is still seq 0 (this request's view is
+    // stale). The route's seq === head+1 check therefore passes (0+1 === 1), so the
+    // collision can only surface as the DB unique violation -- which must become the
+    // same { error, expectedSeq } 409, never an opaque 500.
+    await db.insert(versions).values({
+      id: "v-winner",
+      userId: user.id,
+      documentId: doc.id,
+      seq: 1,
+      parentVersionId: doc.currentVersionId,
+      author: "ai",
+      kind: "edit",
+      summary: "winner",
+      fullText: "winner",
+      diff: [],
+      createdAt: "2026-02-02T00:00:00.000Z",
+      restoredFromVersionId: null,
+    });
+
+    const res = await app.request(`/api/documents/${doc.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({
+        version: editVersion({
+          id: "v-loser",
+          documentId: doc.id,
+          seq: 1,
+          parentVersionId: doc.currentVersionId,
+          fullText: "loser",
+        }),
+      }),
+    });
+    expect(res.status).toBe(409);
+    const out = (await res.json()) as { error: string; expectedSeq: number };
+    expect(out.error).toMatch(/seq conflict/);
+    expect(typeof out.expectedSeq).toBe("number");
+
+    // The losing append wrote nothing: only the seq-0 create and the winner survive.
+    const seqs = (await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq);
+    expect(seqs).toEqual([0, 1]);
+    expect(await repos.versions.get(user.id, "v-loser")).toBeNull();
+  });
 });
 
 describe("POST /api/research", () => {
@@ -434,6 +526,77 @@ describe("POST /api/research", () => {
 
     // Page B had no inline content, so it was fetched; page A's inline content was reused.
     expect(search.fetched).toEqual(["https://ex.com/b"]);
+  });
+
+  it("rejects more than 5 queries with 400 and never touches the search provider", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const search = new FakeSearch([{ title: "t", url: "https://ex.com/x", snippet: "s" }]);
+    // FakeLlm/FakeSearch are drained: any provider call would throw, proving the cap
+    // rejects BEFORE any paid fan-out happens.
+    const app = buildApp({ repos, llm: new FakeLlm(), search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["a", "b", "c", "d", "e", "f"] }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/1-5/);
+    expect(search.searched).toEqual([]);
+  });
+
+  it("rejects an over-long query with 400", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["x".repeat(201)] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts the boundary: exactly 5 queries of 200 chars each", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const search = new FakeSearch([
+      { title: "T", url: "https://ex.com/a", snippet: "s", content: "BODY" },
+    ]);
+    const llm = new FakeLlm([llmResult([], { chatMessage: "Digested note." })]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: Array.from({ length: 5 }, () => "q".repeat(200)) }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { note: string }).note).toBe("Digested note.");
+  });
+});
+
+describe("request body-size limit", () => {
+  it("returns 413 for a body over the 5 MB /api cap", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    // A ~6 MB name blows past the 5 MB cap; the middleware rejects before the handler.
+    const oversized = "x".repeat(6 * 1024 * 1024);
+    const res = await app.request("/api/documents", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ name: oversized }),
+    });
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: string }).error).toMatch(/too large/);
+
+    // Nothing was persisted.
+    const list = await app.request("/api/documents", { headers: authHeaders(user.id) });
+    expect(((await list.json()) as { documents: unknown[] }).documents).toHaveLength(0);
   });
 });
 

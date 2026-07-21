@@ -16,7 +16,10 @@ export interface FindReplace {
   occurrence?: number; // 1-based
 }
 
-export type InsertPosition = "start" | "end" | { afterFind: string };
+export type InsertPosition =
+  | "start"
+  | "end"
+  | { afterFind: string; occurrence?: number };
 
 /** Apply a sequence of find/replace edits left-to-right. Throws on any miss. */
 export function applyEdits(text: string, edits: FindReplace[]): string {
@@ -65,7 +68,9 @@ function applyOne(text: string, edit: FindReplace): string {
   return text.slice(0, at) + replace + text.slice(at + find.length);
 }
 
-/** Insert text at start, end, or immediately after the first match of an anchor. */
+/** Insert text at start, end, or after an anchor. Like applyEdits, an anchor
+ * that is missing -- or ambiguous (matches more than once) without an
+ * `occurrence` -- throws rather than silently inserting at the first match. */
 export function applyInsert(
   text: string,
   position: InsertPosition,
@@ -74,12 +79,29 @@ export function applyInsert(
   if (position === "start") return insert + text;
   if (position === "end") return text + insert;
 
-  const at = text.indexOf(position.afterFind);
-  if (at === -1) {
-    throw new EditError(
-      `Insert anchor not found: ${JSON.stringify(position.afterFind)}`,
-    );
+  const { afterFind, occurrence } = position;
+  const indices = allIndices(text, afterFind);
+  if (indices.length === 0) {
+    throw new EditError(`Insert anchor not found: ${JSON.stringify(afterFind)}`);
   }
-  const cut = at + position.afterFind.length;
+
+  let at: number;
+  if (occurrence == null) {
+    if (indices.length > 1) {
+      throw new EditError(
+        `Ambiguous insert anchor: ${JSON.stringify(afterFind)} appears ${indices.length} times; specify an occurrence.`,
+      );
+    }
+    at = indices[0]!;
+  } else {
+    if (occurrence < 1 || occurrence > indices.length) {
+      throw new EditError(
+        `Occurrence ${occurrence} out of range: ${JSON.stringify(afterFind)} appears ${indices.length} time(s).`,
+      );
+    }
+    at = indices[occurrence - 1]!;
+  }
+
+  const cut = at + afterFind.length;
   return text.slice(0, cut) + insert + text.slice(cut);
 }

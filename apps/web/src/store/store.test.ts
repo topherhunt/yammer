@@ -30,7 +30,13 @@ const openDocState: Partial<AppState> = {
   undoCursor: 0,
 };
 
-function makeStore(config: { api?: MockApiConfig; initial?: Partial<AppState> } = {}) {
+function makeStore(
+  config: {
+    api?: MockApiConfig;
+    initial?: Partial<AppState>;
+    retryDelayMs?: (attempt: number) => number;
+  } = {},
+) {
   const api = new MockApiClient(config.api);
   const stt = new MockStt();
   let n = 0;
@@ -40,9 +46,13 @@ function makeStore(config: { api?: MockApiConfig; initial?: Partial<AppState> } 
     newId: () => `id-${++n}`,
     now: () => "2026-01-01T00:00:00.000Z",
     initial: config.initial ?? openDocState,
+    // Drop the backoff in tests; the retry semantics are what we assert, not wall time.
+    retryDelayMs: config.retryDelayMs ?? (() => 0),
   });
   return { store, api, stt };
 }
+
+const usage = { sttSeconds: 1, inputTokens: 100, cachedInputTokens: 0, outputTokens: 5 };
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -180,5 +190,182 @@ describe("dialog + document effects", () => {
     expect(state.app.activeDocument?.text).toBe("");
     expect(state.app.history).toHaveLength(1);
     expect(state.usages).toEqual([]);
+  });
+});
+
+describe("durable version persistence", () => {
+  it("persists the undo timeline alongside the version (N3)", async () => {
+    const { store, api } = makeStore();
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    await store.getState().flushPersistQueue();
+
+    expect(api.persistedVersions).toHaveLength(1);
+    const app = store.getState().app;
+    // The undo timeline advanced past the create version, and that exact state
+    // was sent with the persisted version.
+    expect(app.undoStack).toHaveLength(2);
+    expect(app.undoCursor).toBe(1);
+    expect(api.persistedUndo[0]).toEqual({
+      undoStack: app.undoStack,
+      undoCursor: app.undoCursor,
+    });
+  });
+
+  it("retries a failed persist and surfaces the error without dropping the edit", async () => {
+    const { store, api } = makeStore({
+      api: {
+        persistFailer: () => {
+          throw new Error("network down");
+        },
+      },
+    });
+
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    // The edit is applied locally regardless of the save outcome.
+    expect(store.getState().app.activeDocument?.text).toBe("the dog sat");
+    await store.getState().flushPersistQueue();
+
+    // Three attempts (MAX_PERSIST_TRIES) before giving up -- no single silent try.
+    expect(api.persistAttempts).toBe(3);
+    // Nothing recorded as saved (every attempt threw), and the failure is loud.
+    expect(api.persistedVersions).toHaveLength(0);
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+    expect(store.getState().lastError).toMatch(/could not save/i);
+  });
+
+  it("reloads and reconciles the document on a 409 seq-conflict (no silent drop)", async () => {
+    const serverVersion = createVersion({
+      id: "srv-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      documentId: "d1",
+      parent: null,
+      author: "user",
+      kind: "create",
+      newText: "server wins",
+      summary: "Created document",
+    });
+    const { store, api } = makeStore({
+      api: {
+        persistFailer: () => {
+          const err = new Error("seq conflict") as Error & { status: number };
+          err.status = 409;
+          throw err;
+        },
+        documentPayloads: {
+          d1: {
+            document: {
+              id: "d1",
+              name: "Doc",
+              text: "server wins",
+              currentVersionId: "srv-1",
+              currentSeq: 0,
+            },
+            history: [serverVersion],
+          },
+        },
+      },
+    });
+
+    store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
+    await store.getState().flushPersistQueue();
+
+    const app = store.getState().app;
+    // A 409 is not retried -- it means reconcile, not backoff.
+    expect(api.persistAttempts).toBe(1);
+    // The authoritative server document + history replaced local state.
+    expect(app.activeDocument?.text).toBe("server wins");
+    expect(app.history.map((v) => v.id)).toEqual(["srv-1"]);
+    expect(app.undoStack).toEqual(["srv-1"]);
+    expect(app.undoCursor).toBe(0);
+    // The user is told, loudly, that the document changed elsewhere.
+    expect(app.chat.at(-1)).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/changed on another device/i),
+    });
+    expect(store.getState().lastError).toMatch(/reloaded from the server/i);
+  });
+});
+
+describe("serialized voice turns", () => {
+  it("processes rapid utterances one at a time so the second sees the first's edit", async () => {
+    const { store, api } = makeStore({
+      api: {
+        turnResponses: [
+          { actions: [{ type: "insert_text", position: "end", text: " ONE" }], usage, raw: {} },
+          { actions: [{ type: "edit_text", edits: [{ find: "ONE", replace: "TWO" }] }], usage, raw: {} },
+        ],
+      },
+    });
+
+    // Fire two utterances back-to-back without awaiting the first.
+    const p1 = store.getState().submitTranscript("first");
+    const p2 = store.getState().submitTranscript("second");
+    await Promise.all([p1, p2]);
+
+    // Second turn's edit anchor ("ONE") only existed because the first turn had
+    // already committed -- proving strict sequencing, not a race.
+    expect(store.getState().app.activeDocument?.text).toBe("the cat sat TWO");
+    expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(false);
+    // The second turn re-assembled context against the first turn's result.
+    expect(api.turnRequests[1]!.context.document?.numberedText).toContain("ONE");
+  });
+
+  it("resets sttPhase to idle when the turn request throws (never freezes the mic)", async () => {
+    const { store } = makeStore({
+      api: {
+        turnResponder: () => {
+          throw new Error("relay exploded");
+        },
+      },
+    });
+
+    await store.getState().submitTranscript("hello");
+
+    expect(store.getState().sttPhase).toBe("idle");
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+  });
+
+  it("surfaces an error and resets sttPhase when applying the turn throws (mic not frozen)", async () => {
+    // A non-EditError thrown from inside the reducer (here: version-id minting)
+    // must not leave sttPhase stuck at "sending" on the singleton store.
+    let n = 0;
+    const api = new MockApiClient({
+      turnResponder: () => ({
+        actions: [{ type: "insert_text", position: "end", text: " x" }],
+        usage,
+        raw: {},
+      }),
+    });
+    const store = createAppStore({
+      api,
+      stt: new MockStt(),
+      now: () => "2026-01-01T00:00:00.000Z",
+      newId: () => {
+        n += 1;
+        // Call 1 mints the user_message id; call 2 is the reducer minting the new
+        // version -- throw there so applyTurn throws mid-turn.
+        if (n === 2) throw new Error("reducer boom");
+        return `id-${n}`;
+      },
+      initial: openDocState,
+    });
+
+    await store.getState().submitTranscript("go");
+
+    expect(store.getState().sttPhase).toBe("idle");
+    expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(true);
+  });
+});
+
+describe("effect failure surfacing", () => {
+  it("surfaces an error entry when a load_document effect rejects", async () => {
+    // No document payloads configured, so the mock getDocument rejects.
+    const { store } = makeStore({ api: {} });
+
+    store.getState().dispatch({ type: "load_document", documentId: "missing" });
+    await flush();
+
+    expect(store.getState().app.chat.at(-1)).toMatchObject({ kind: "error" });
+    expect(store.getState().lastError).toMatch(/loading the document/i);
   });
 });

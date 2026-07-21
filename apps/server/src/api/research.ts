@@ -9,6 +9,11 @@ import type { SearchResult, Usage } from "@yammer/shared";
 import type { RouteDeps } from "./routes";
 import { requireUser } from "../auth/session";
 import { buildResearchPrompt, renderResearchInput } from "./prompt";
+import {
+  MAX_RESEARCH_QUERIES,
+  MAX_RESEARCH_QUERY_LENGTH,
+  researchRequestSchema,
+} from "./validation";
 
 const MAX_PAGES = 3;
 
@@ -17,23 +22,26 @@ export async function handleResearch(
   deps: RouteDeps,
 ): Promise<Response> {
   requireUser(c);
-  const body = (await c.req.json().catch(() => null)) as {
-    queries?: unknown;
-  } | null;
+  const body = (await c.req.json().catch(() => null)) as unknown;
 
-  const queries = body?.queries;
-  if (
-    !Array.isArray(queries) ||
-    queries.length === 0 ||
-    !queries.every((q) => typeof q === "string" && q.length > 0)
-  ) {
-    return c.json({ error: "queries (non-empty string[]) is required" }, 400);
+  // Bounded fan-out: 1..MAX_RESEARCH_QUERIES queries, each 1..MAX length. This is
+  // the real-dollar guardrail -- an unbounded array would fan out paid API calls.
+  const parsed = researchRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      {
+        error: `queries must be 1-${MAX_RESEARCH_QUERIES} non-empty strings, each at most ${MAX_RESEARCH_QUERY_LENGTH} chars`,
+        detail: parsed.error.issues,
+      },
+      400,
+    );
   }
+  const queries = parsed.data.queries;
 
   // Search each query; dedupe results by URL, preserving first-seen order.
   const seen = new Set<string>();
   const collected: SearchResult[] = [];
-  for (const query of queries as string[]) {
+  for (const query of queries) {
     const results = await deps.search.search(query);
     for (const r of results) {
       if (!seen.has(r.url)) {
@@ -62,7 +70,7 @@ export async function handleResearch(
   const llmResult = await deps.llm.complete({
     system: buildResearchPrompt(),
     messages: [
-      { role: "user", content: renderResearchInput(queries as string[], pages) },
+      { role: "user", content: renderResearchInput(queries, pages) },
     ],
     model,
   });

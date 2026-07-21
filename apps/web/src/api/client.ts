@@ -30,6 +30,27 @@ export interface DocumentPayload {
   history: Version[];
 }
 
+/** The client's undo timeline, persisted alongside each version (N3). */
+export interface PersistUndo {
+  undoStack: string[];
+  undoCursor: number;
+}
+
+/**
+ * An HTTP failure that carries the numeric status, so the persist queue can
+ * branch on 409 (seq-conflict -> reconcile) vs a transient error (retry). Thrown
+ * by FetchApiClient on any non-2xx response; MockApiClient conforms by letting
+ * tests throw errors that carry a `.status`.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 export interface ApiClient {
   /** POST /api/turn -- transcript + situational context in, structured LLM
    * result (unvalidated actions) out. The store validates with parseLlmResponse. */
@@ -42,7 +63,9 @@ export interface ApiClient {
     byDate?: string,
   ): Promise<DocumentPayload>;
   renameDocument(documentId: string, name: string): Promise<void>;
-  persistVersion(version: Version): Promise<void>;
+  /** Append a version to the doc's history. `undo` carries the client's undo
+   * timeline (N3) so the server persists it alongside the snapshot. */
+  persistVersion(version: Version, undo?: PersistUndo): Promise<void>;
   persistSettings(settings: Settings): Promise<void>;
 
   /** Runs the server research pipeline; returns only the digested findings note. */

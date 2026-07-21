@@ -29,7 +29,12 @@ export const insertTextAction = z.object({
   position: z.union([
     z.literal("start"),
     z.literal("end"),
-    z.object({ afterFind: z.string().min(1) }),
+    // `occurrence` (1-based) disambiguates when the anchor repeats; without it,
+    // a repeated anchor throws rather than silently inserting at the first match.
+    z.object({
+      afterFind: z.string().min(1),
+      occurrence: z.number().int().positive().optional(),
+    }),
   ]),
   text: z.string().min(1),
 });

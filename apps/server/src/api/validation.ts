@@ -14,6 +14,19 @@ export const settingsSchema = z.object({
 
 export const sortKeySchema = z.enum(["name", "created", "updated"]);
 
+// Research fan-out bounds. Each query hits a paid search API (and each picked page
+// a paid LLM digest), so cap both the number of queries and their length to close
+// an unbounded real-dollar fan-out (plan.md sec 8). Small, deliberate limits.
+export const MAX_RESEARCH_QUERIES = 5;
+export const MAX_RESEARCH_QUERY_LENGTH = 200;
+
+export const researchRequestSchema = z.object({
+  queries: z
+    .array(z.string().min(1).max(MAX_RESEARCH_QUERY_LENGTH))
+    .min(1)
+    .max(MAX_RESEARCH_QUERIES),
+});
+
 /** Sanitize a document name into a safe download filename. */
 export function sanitizeFilename(name: string): string {
   return (

@@ -5,9 +5,15 @@
 
 import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { LlmProvider, SearchProvider, Version } from "@yammer/shared";
-import type { Repos, User } from "../db/repos";
+import {
+  DuplicateNameError,
+  isUniqueViolation,
+  type Repos,
+  type User,
+} from "../db/repos";
 import {
   clearSessionCookie,
   requireUser,
@@ -32,6 +38,10 @@ export interface RouteDeps {
 }
 
 const OAUTH_STATE_COOKIE = "yammer_oauth_state";
+
+// Generous but bounded: documents/context payloads can be large, but a request
+// body should never exceed a few MB. Caps memory + closes an oversized-body vector.
+const MAX_API_BODY_BYTES = 5 * 1024 * 1024;
 
 /** Public projection of a user (there are no secret fields, but be explicit). */
 function publicUser(u: User) {
@@ -90,6 +100,16 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     return c.json({ ok: true });
   });
 
+  // -- Body-size cap on every /api route (before auth so oversized bodies are
+  //    rejected early with a clean 413, not read into memory) -----------------
+  app.use(
+    "/api/*",
+    bodyLimit({
+      maxSize: MAX_API_BODY_BYTES,
+      onError: (c) => c.json({ error: "request body too large" }, 413),
+    }),
+  );
+
   // -- Everything under /api requires a valid session --------------------
   app.use("/api/*", sessionMiddleware(repos));
 
@@ -127,7 +147,15 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     const user = requireUser(c);
     const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
     const name = typeof body.name === "string" && body.name ? body.name : undefined;
-    return c.json({ document: await repos.documents.create(user.id, { name }) }, 201);
+    try {
+      return c.json({ document: await repos.documents.create(user.id, { name }) }, 201);
+    } catch (err) {
+      // Case-insensitive name collision -> 409 (never silently create a duplicate).
+      if (err instanceof DuplicateNameError || isUniqueViolation(err)) {
+        return c.json({ error: "a document with that name already exists" }, 409);
+      }
+      throw err;
+    }
   });
 
   app.get("/api/documents/:id", async (c) => {
@@ -147,7 +175,15 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     // Ownership: rename's WHERE is scoped to userId; confirm existence for a clean 404.
     const doc = await repos.documents.get(user.id, id);
     if (!doc) return c.json({ error: "not found" }, 404);
-    return c.json({ document: await repos.documents.rename(user.id, id, body.name) });
+    try {
+      return c.json({ document: await repos.documents.rename(user.id, id, body.name) });
+    } catch (err) {
+      // Renaming onto another document's name (case-insensitively) -> 409.
+      if (err instanceof DuplicateNameError || isUniqueViolation(err)) {
+        return c.json({ error: "a document with that name already exists" }, 409);
+      }
+      throw err;
+    }
   });
 
   app.get("/api/documents/:id/versions", async (c) => {
@@ -208,8 +244,24 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
       Array.isArray(body?.undoStack) && typeof body?.undoCursor === "number"
         ? { undoStack: body.undoStack as string[], undoCursor: body.undoCursor }
         : undefined;
-    const saved = await repos.versions.append(user.id, version, undo);
-    return c.json({ version: saved }, 201);
+    try {
+      const saved = await repos.versions.append(user.id, version, undo);
+      return c.json({ version: saved }, 201);
+    } catch (err) {
+      // A truly concurrent append that passed the seq === head+1 check above but
+      // lost the UNIQUE(document_id, seq) race raises 23505. Map it to the SAME
+      // structured 409 the stale-seq path returns, not an opaque 500. Re-read the
+      // head so expectedSeq reflects the winning append.
+      if (isUniqueViolation(err)) {
+        const fresh = await repos.documents.get(user.id, id);
+        const expectedSeq = (fresh?.currentSeq ?? doc.currentSeq) + 1;
+        return c.json(
+          { error: `seq conflict: expected ${expectedSeq}, got ${version.seq}`, expectedSeq },
+          409,
+        );
+      }
+      throw err;
+    }
   });
 
   app.get("/api/documents/:id/export", async (c) => {
@@ -251,14 +303,15 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
   app.post("/api/turn", (c) => handleTurn(c, deps));
   app.post("/api/research", (c) => handleResearch(c, deps));
 
-  // -- STT WebSocket placeholder -----------------------------------------
-  // The proxy bridge (stt/bridge.ts) is unit-tested with a fake upstream; the
-  // actual socket upgrade is wired in the voice phase (needs a node-ws adapter).
+  // -- STT WebSocket endpoint --------------------------------------------
+  // The real WS upgrade is handled off the raw Node http server (stt/upgrade.ts),
+  // which fires before Hono for `Upgrade: websocket` requests. This route is only
+  // reached by a plain (non-upgrading) HTTP GET, which must use a WebSocket.
   app.get("/api/stt", (c) =>
     c.json(
       {
         error: "upgrade required",
-        detail: "WebSocket STT endpoint; the HTTP upgrade is wired in the voice phase.",
+        detail: "Connect to /api/stt over WebSocket, not plain HTTP.",
       },
       426,
     ),

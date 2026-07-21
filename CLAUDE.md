@@ -28,7 +28,7 @@ This is a real tool for a real person. Reliability and low friction matter more 
 - **Stack:** TypeScript everywhere. pnpm monorepo. React + Vite frontend, CodeMirror 6 editor, Zustand, Tailwind. Hono backend on Node. PostgreSQL + Drizzle. Google OAuth.
 - **LLM:** GPT-5.6 **Luna** in dev, **Terra** in prod (same family = dev/prod parity), via OpenAI direct behind `LlmProvider`. Structured output, not free-form tool calls.
 - **STT:** `gpt-realtime-whisper` (streaming transcription, $0.017/min) over a backend WebSocket proxy. NOT the speech-to-speech `gpt-realtime-2.1`. Web Speech is a desktop-Chrome-only fallback.
-- **Voice UX:** tap-to-start gate; three states (listening / paused / muted). Pause keeps a local Porcupine wake-word spotter alive; **"Yammer, wake up"** resumes hands-free. Stop is AI-interpreted from any *explicit* phrasing (bare "stop" must not pause). SFX on send and mute/unmute. Pause on tab-background, resume on foreground.
+- **Voice UX:** tap-to-start gate; three states (listening / paused / muted). Pause keeps a local **Vosk** (`vosk-browser`) wake-word spotter alive -- open-source (Apache-2.0), keyless, 100% on-device; **"Yammer, wake up"** resumes hands-free. Stop is AI-interpreted from any *explicit* phrasing (bare "stop" must not pause). SFX on send and mute/unmute. Pause on tab-background, resume on foreground.
 - **Research:** DIY pipeline (search -> LLM picks pages -> fetch -> summarize-to-notebook), default provider **Tavily**. Only the digested summary enters context, never raw pages. Never invoked unprompted.
 - **Hosting:** self-hosted Racknerd VPS behind Caddy, new DB on the existing Postgres. Deployment is deferred; keep the server plain-`node`-runnable.
 - **Features to remember:** per-document spend meter (STT + inference $) at the bottom of the chat sidebar; downloadable diagnostic log (transcripts -> raw LLM responses -> actions + full edit history); recency-fading yellow edit highlights so corrections are just the next edit.
@@ -41,6 +41,28 @@ This is a real tool for a real person. Reliability and low friction matter more 
 - **CSS is utility-first (Tailwind).** Compose from utilities before adding classes. A page-specific class only for a genuine multi-property, stateful component.
 - **Scope discipline.** Implement what's asked, nothing speculative. Don't refactor working code or add abstractions for cases that can't happen. Three similar lines beat a premature abstraction. Clean up anything your change orphans; flag (don't silently delete) pre-existing dead code.
 - **Read the actual code before changing or describing it.** Follow real imports and data flow; don't infer behavior from names. State what you haven't verified.
+
+## Live-API tests & real-dollar spend (project-specific green light)
+
+The user has explicitly authorized **limited** real API spend for a dedicated **live-API test tier** (real LLM/STT calls), separate from the default mocked suite. This narrowly overrides the global "confirm every external-dollar spend" default -- but only within the limits below. The mocked suite remains the default and stays free.
+
+**Standing green light -- proceed WITHOUT asking only when ALL hold:**
+- It's the dedicated live tier (gated by env, never part of normal `pnpm test`/CI).
+- Estimated **total for the run is < $1.00**.
+- Estimated **cost per individual test case is < $0.02** (2 cents).
+- You have first **stated explicitly**: the model used, the number of API calls / test cases, the estimated cost per case, and the estimated total for the run.
+
+**Ask the user FIRST if any of these:**
+- Projected **total for a run >= $1.00**, or any **single case >= $0.02**.
+- You are materially growing the case count, raising `YAMMER_LIVE_BUDGET_USD`, or running in a loop that compounds cost.
+- Switching the eval model to a pricier tier (e.g. Terra/Sol vs Luna).
+
+**Always:**
+- The harness enforces a hard budget cap (`YAMMER_LIVE_BUDGET_USD`, default $0.50) that aborts the run if cumulative cost exceeds it.
+- After each run, **report actual cost** (from returned `usage`) vs the estimate, and append a per-run line to `test-costs.jsonl` (gitignored).
+- STT/audio live tests bill per audio-minute (~$0.017/min) -- keep clips to a few seconds.
+
+Reference cost (per 1M tokens, input/output): gpt-5.6-luna $1/$6, terra $2.50/$15. A ~12-case LLM turn eval on Luna is roughly ~$0.05-0.10 per full run (each case ~half a cent), comfortably inside the standing green light.
 
 ## Testing
 

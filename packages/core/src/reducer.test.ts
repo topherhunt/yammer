@@ -102,19 +102,27 @@ describe("restore_version", () => {
 });
 
 describe("restore_fragment", () => {
-  it("swaps a fragment in the current text and tags the source version", () => {
+  it("swaps a fragment back to text from the named version and tags provenance", () => {
+    const c = makeCtx("ai");
+    let s = docState("keep that line"); // v0 contains "that"
+    s = applyAction(s, { type: "edit_text", edits: [{ find: "that", replace: "this" }] }, c).state;
     const { state } = applyAction(
-      docState("keep this line"),
-      {
-        type: "restore_fragment",
-        versionId: "v0",
-        find: "this",
-        replace: "that",
-      },
-      makeCtx("ai"),
+      s,
+      { type: "restore_fragment", versionId: "v0", find: "this", replace: "that" },
+      c,
     );
     expect(state.activeDocument?.text).toBe("keep that line");
-    expect(state.history[1]?.restoredFromVersionId).toBe("v0");
+    expect(state.history[state.history.length - 1]?.restoredFromVersionId).toBe("v0");
+  });
+
+  it("rejects a fragment restore whose text was never in that version", () => {
+    const { state } = applyAction(
+      docState("keep this line"), // v0 never contained "nonsense"
+      { type: "restore_fragment", versionId: "v0", find: "this", replace: "nonsense" },
+      makeCtx("ai"),
+    );
+    expect(lastChat(state.chat).kind).toBe("error");
+    expect(state.activeDocument?.text).toBe("keep this line"); // unchanged
   });
 });
 

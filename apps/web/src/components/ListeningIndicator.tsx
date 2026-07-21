@@ -1,10 +1,12 @@
 import { cx } from "../util/cx";
 import { useAppStore, useStoreApi } from "../store/context";
 
-// Bottom-of-sidebar mic control + status. Pulses when the mic detects speech
-// (VAD) and shows a radial spinner while a turn is being finalized/sent. The
-// button toggles listening/muted so the whole thing is mouse+keyboard operable;
-// voice-driven pause/mute arrives via set_listening actions in Phase 4.
+// Bottom-of-sidebar mic control + status, wired to the listening machine via the
+// store. It pulses when the machine reports VAD speech and shows the radial while
+// an utterance is finalizing / in the pre-send grace window (listeningPhase) or a
+// turn is in flight (sttPhase "sending"). The button toggles listening/muted so
+// the whole thing is mouse+keyboard operable; voice-driven pause/mute arrives via
+// set_listening actions, which flow to the same machine.
 
 const LABELS: Record<string, string> = {
   listening: "Listening",
@@ -18,8 +20,9 @@ export function ListeningIndicator() {
   const vad = useAppStore((s) => s.vadActive);
   const phase = useAppStore((s) => s.sttPhase);
 
+  const listeningPhase = useAppStore((s) => s.listeningPhase);
   const isListening = listening === "listening";
-  const busy = phase === "sending" || phase === "finalizing";
+  const busy = phase === "sending" || listeningPhase === "finalizing";
   const pulsing = isListening && vad;
 
   const toggle = () => {

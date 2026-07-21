@@ -6,12 +6,15 @@ import type {
   AppState,
   Author,
   Effect,
+  ListeningState,
   LlmResponse,
   ScrollState,
   SfxSound,
   SttProvider,
   Usage,
+  Version,
 } from "@yammer/shared";
+import type { Sfx } from "../voice/interfaces";
 import { initialState } from "@yammer/shared";
 import {
   applyAction,
@@ -21,7 +24,7 @@ import {
   parseLlmResponse,
 } from "@yammer/core";
 import type { Ctx } from "@yammer/core";
-import type { ApiClient } from "../api/client";
+import type { ApiClient, PersistUndo } from "../api/client";
 import { copyToClipboard, downloadFile, playSfx } from "./browser-effects";
 
 // The Zustand store is the edge: it holds AppState, drives the pure reducer with
@@ -47,9 +50,22 @@ export interface AppStore {
   /** True while the mic detects speech (drives the pulse indicator). */
   vadActive: boolean;
   sttPhase: SttPhase;
+  /** Machine-derived: "finalizing" while an utterance is finalizing or in the
+   * pre-send grace window (drives the radial). Distinct from `sttPhase`, which
+   * the turn loop owns for the LLM "sending" phase. */
+  listeningPhase: "idle" | "finalizing";
+  /** Whether the tap-to-start gate has been dismissed and the mic granted. An
+   * edge/session flag, not persisted domain state. */
+  micStarted: boolean;
   lastError: string | null;
   scrollCommand: ScrollCommand | null;
 
+  /** Tap-to-start gate: dismiss the gate and begin listening. Must run inside a
+   * user gesture so the mic-permission request the set_listening effect triggers
+   * is allowed by the browser. */
+  startMic: () => void;
+  /** Push the voice pipeline's derived indicator signals into the view. */
+  setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
   /** Apply one action from a UI control (default author "user"). */
   dispatch: (action: Action, author?: Author) => void;
   /** Apply a validated LLM turn (author "ai") and record its usage. */
@@ -63,6 +79,10 @@ export interface AppStore {
   /** Live text sync from direct keyboard editing (no version -- a dev
    * convenience; AI/voice edits are the ones that append to history). */
   setDocumentText: (text: string) => void;
+  /** Resolves when the serial version-persist queue has drained (or paused on a
+   * surfaced error). Primarily a test hook -- persistence is fire-and-await in
+   * the background, and this lets callers wait for it deterministically. */
+  flushPersistQueue: () => Promise<void>;
 }
 
 export interface StoreDeps {
@@ -71,6 +91,15 @@ export interface StoreDeps {
   now?: () => string;
   newId?: () => string;
   initial?: Partial<AppState>;
+  /** Backoff before retrying a failed persist (ms), by 0-based attempt index.
+   * Overridable so tests can drop the delays. */
+  retryDelayMs?: (attempt: number) => number;
+  /** Sound-effect sink for the play_sfx effect. When omitted we fall back to the
+   * built-in browser-effects tone (keeps the store usable with no voice wiring). */
+  sfx?: Sfx;
+  /** Routes the set_listening effect to the voice pipeline's listening machine.
+   * When omitted the store just drives the injected SttProvider (Phase 3). */
+  onSetListening?: (state: ListeningState) => void;
 }
 
 export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
@@ -79,6 +108,23 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
   const now = deps.now ?? (() => new Date().toISOString());
   let scrollNonce = 0;
 
+  const MAX_PERSIST_TRIES = 3;
+  const retryDelayMs = deps.retryDelayMs ?? ((attempt) => 200 * 2 ** attempt);
+  const delay = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
+  const errMessage = (err: unknown): string =>
+    err instanceof Error ? err.message : String(err);
+
+  /** Numeric HTTP status if the error carries one (ApiError does), else undefined. */
+  function httpStatus(err: unknown): number | undefined {
+    if (typeof err === "object" && err !== null && "status" in err) {
+      const s = (err as { status?: unknown }).status;
+      if (typeof s === "number") return s;
+    }
+    return undefined;
+  }
+
   const store = createStore<AppStore>((set, get) => {
     const ctxFor = (author: Author): Ctx => ({ newId, now, author });
 
@@ -86,8 +132,121 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       set((s) => ({ app: { ...s.app, chat: [...s.app.chat, entry] } }));
     }
 
+    /** Surface a failure loudly: an error entry in the chat log + lastError.
+     * Nothing in the store should ever swallow a rejection -- a dropped edit is
+     * the worst failure for a voice user, so every path funnels through here. */
+    function surfaceError(message: string): void {
+      pushEntry({ kind: "error", id: newId(), at: now(), message });
+      set({ lastError: message });
+    }
+
+    /** Run a fire-and-forget async effect, surfacing any rejection instead of
+     * letting it vanish into an unhandled promise. */
+    function runGuarded(label: string, work: () => Promise<void>): void {
+      void work().catch((err) => {
+        surfaceError(`${label} failed: ${errMessage(err)}`);
+      });
+    }
+
+    // -- Durable, ordered version persistence -------------------------------
+    // Versions persist through a serial FIFO queue: one in-flight write at a
+    // time, drained strictly in order so the server's seq never sees a gap. A
+    // transient failure retries with backoff and then surfaces (never drops) the
+    // edit; a 409 seq-conflict means another device advanced the head, so we
+    // reload the authoritative document and tell the user.
+
+    interface PersistItem {
+      version: Version;
+      undo: PersistUndo;
+    }
+    const persistQueue: PersistItem[] = [];
+    let draining = false;
+    let drainPromise: Promise<void> = Promise.resolve();
+
+    function enqueuePersist(version: Version, undo: PersistUndo): void {
+      persistQueue.push({ version, undo });
+      if (!draining) {
+        draining = true;
+        drainPromise = drainPersistQueue().finally(() => {
+          draining = false;
+        });
+      }
+    }
+
+    async function attemptPersist(
+      item: PersistItem,
+    ): Promise<"ok" | "conflict" | "failed"> {
+      for (let attempt = 0; attempt < MAX_PERSIST_TRIES; attempt++) {
+        try {
+          await deps.api.persistVersion(item.version, item.undo);
+          return "ok";
+        } catch (err) {
+          if (httpStatus(err) === 409) return "conflict";
+          if (attempt < MAX_PERSIST_TRIES - 1) await delay(retryDelayMs(attempt));
+        }
+      }
+      return "failed";
+    }
+
+    async function drainPersistQueue(): Promise<void> {
+      while (persistQueue.length > 0) {
+        const item = persistQueue[0]!;
+        const outcome = await attemptPersist(item);
+        if (outcome === "ok") {
+          persistQueue.shift();
+          continue;
+        }
+        if (outcome === "conflict") {
+          // The server head advanced elsewhere. Everything queued was built on a
+          // now-stale base, so drop the local queue and reload rather than
+          // replaying into a cascade of 409s.
+          persistQueue.length = 0;
+          await reconcile(item.version.documentId);
+          return;
+        }
+        // Transient failure survived every retry. PAUSE at the head (never drop
+        // the edit) and surface it; the next persist resumes the drain, retrying
+        // this same version first, so ordering and the user's work are preserved.
+        surfaceError(
+          `Could not save your last edit to the server after ${MAX_PERSIST_TRIES} attempts. Your work is kept and will retry -- please check your connection.`,
+        );
+        return;
+      }
+    }
+
+    /** Reload the authoritative document + history after a seq-conflict and
+     * rebuild the undo timeline from the server, telling the user it changed. */
+    async function reconcile(documentId: string): Promise<void> {
+      try {
+        const payload = await deps.api.getDocument(documentId);
+        set((s) => ({
+          app: {
+            ...s.app,
+            activeDocument: payload.document,
+            history: payload.history,
+            undoStack: payload.history.map((v) => v.id),
+            undoCursor: payload.history.length - 1,
+          },
+        }));
+        pushEntry({
+          kind: "error",
+          id: newId(),
+          at: now(),
+          message:
+            "This document changed on another device, so your last edit could not be saved. It has been reloaded from the server -- please re-apply your change.",
+        });
+        set({ lastError: "Document changed elsewhere; reloaded from the server." });
+      } catch (err) {
+        surfaceError(
+          `Reloading the document after a sync conflict failed: ${errMessage(err)}`,
+        );
+      }
+    }
+
     function sfx(sound: SfxSound): void {
-      if (get().app.settings.sfxEnabled) playSfx(sound);
+      if (!get().app.settings.sfxEnabled) return;
+      if (deps.sfx) deps.sfx.play(sound);
+      else playSfx(sound);
     }
 
     function handleCreateDocument(localId: string, name?: string): void {
@@ -119,7 +278,8 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         },
         usages: [],
       }));
-      void deps.api.persistVersion(version);
+      const { undoStack, undoCursor } = get().app;
+      enqueuePersist(version, { undoStack, undoCursor });
     }
 
     async function handleLoadDocument(e: {
@@ -151,7 +311,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       pushEntry({ kind: "research", id: newId(), at: now(), summary });
     }
 
-    function handleExport(documentId: string, format: "md" | "docx"): void {
+    async function handleExport(
+      documentId: string,
+      format: "md" | "docx",
+    ): Promise<void> {
       const doc = get().app.activeDocument;
       if (!doc || doc.id !== documentId) return;
       const safeName = doc.name.replace(/[^\w.-]+/g, "_") || "document";
@@ -159,9 +322,8 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         downloadFile(`${safeName}.md`, doc.text, "text/markdown");
         return;
       }
-      void deps.api.exportDocx(documentId).then((blob) => {
-        downloadFile(`${safeName}.docx`, blob, blob.type);
-      });
+      const blob = await deps.api.exportDocx(documentId);
+      downloadFile(`${safeName}.docx`, blob, blob.type);
     }
 
     function handleDiagnostics(): void {
@@ -179,31 +341,44 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     }
 
     function applyListening(state: AppState["listening"]): void {
-      if (state === "listening") deps.stt.start();
+      // Prefer the voice pipeline's listening machine when wired; otherwise drive
+      // the injected SttProvider directly (Phase 3 / test path).
+      if (deps.onSetListening) deps.onSetListening(state);
+      else if (state === "listening") deps.stt.start();
       else deps.stt.stop();
-      if (state !== "listening") set({ vadActive: false, sttPhase: "idle" });
+      if (state !== "listening") {
+        set({ vadActive: false, sttPhase: "idle", listeningPhase: "idle" });
+      }
     }
 
     function runEffects(effects: Effect[]): void {
       for (const effect of effects) {
         switch (effect.type) {
-          case "persist_version":
-            void deps.api.persistVersion(effect.version);
+          case "persist_version": {
+            // Persist the resulting version AND the current undo timeline (N3),
+            // read after the reducer's state was committed above.
+            const { undoStack, undoCursor } = get().app;
+            enqueuePersist(effect.version, { undoStack, undoCursor });
             break;
+          }
           case "create_document":
             handleCreateDocument(effect.localId, effect.name);
             break;
           case "load_document":
-            void handleLoadDocument(effect);
+            runGuarded("Loading the document", () => handleLoadDocument(effect));
             break;
           case "load_documents":
-            void handleLoadDocuments(effect.sort);
+            runGuarded("Loading the document list", () =>
+              handleLoadDocuments(effect.sort),
+            );
             break;
           case "rename_document":
-            void deps.api.renameDocument(effect.documentId, effect.name);
+            runGuarded("Renaming the document", () =>
+              deps.api.renameDocument(effect.documentId, effect.name),
+            );
             break;
           case "run_research":
-            void handleResearch(effect.queries);
+            runGuarded("Research", () => handleResearch(effect.queries));
             break;
           case "scroll_to":
             set({
@@ -219,16 +394,22 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             applyListening(effect.state);
             break;
           case "copy_to_clipboard":
-            void copyToClipboard(effect.text);
+            runGuarded("Copying to the clipboard", () =>
+              copyToClipboard(effect.text),
+            );
             break;
           case "export_document":
-            handleExport(effect.documentId, effect.format);
+            runGuarded("Exporting the document", () =>
+              handleExport(effect.documentId, effect.format),
+            );
             break;
           case "play_sfx":
             sfx(effect.sound);
             break;
           case "persist_settings":
-            void deps.api.persistSettings(effect.settings);
+            runGuarded("Saving your settings", () =>
+              deps.api.persistSettings(effect.settings),
+            );
             break;
           case "download_diagnostics":
             handleDiagnostics();
@@ -247,54 +428,75 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       runEffects(result.effects);
     }
 
-    return {
-      app: initialState(deps.initial),
-      usages: [],
-      vadActive: false,
-      sttPhase: "idle",
-      lastError: null,
-      scrollCommand: null,
+    // -- Serialized voice turns --------------------------------------------
+    // Utterances run through a FIFO queue, one turn fully committed before the
+    // next starts. Two quickly-finalized utterances must not race: each turn
+    // re-assembles SituationalContext against the LATEST committed state, so the
+    // second turn sees the first turn's edits instead of a stale snapshot.
 
-      dispatch(action, author = "user") {
-        const result = applyAction(get().app, action, ctxFor(author));
-        set({ app: result.state, lastError: result.error ?? null });
-        runEffects(result.effects);
-      },
+    interface QueuedTurn {
+      text: string;
+      sttSeconds?: number;
+      resolve: () => void;
+    }
+    const turnQueue: QueuedTurn[] = [];
+    let processingTurns = false;
 
-      applyResponse,
+    function enqueueTurn(text: string, sttSeconds?: number): Promise<void> {
+      return new Promise<void>((resolve) => {
+        turnQueue.push({ text, sttSeconds, resolve });
+        if (!processingTurns) {
+          processingTurns = true;
+          void processTurnQueue();
+        }
+      });
+    }
 
-      async submitTranscript(text, sttSeconds) {
-        const trimmed = text.trim();
-        if (!trimmed) return;
-        set((s) => ({
-          app: {
-            ...s.app,
-            chat: [
-              ...s.app.chat,
-              { kind: "user_message", id: newId(), at: now(), text: trimmed },
-            ],
-          },
-          sttPhase: "sending",
-        }));
+    async function processTurnQueue(): Promise<void> {
+      try {
+        while (turnQueue.length > 0) {
+          const item = turnQueue[0]!;
+          try {
+            await runTurn(item.text, item.sttSeconds);
+          } finally {
+            turnQueue.shift();
+            item.resolve();
+          }
+        }
+      } finally {
+        processingTurns = false;
+      }
+    }
 
+    /** Run a single turn. sttPhase is reset in a `finally` no matter what fails
+     * -- the store is a module singleton, so a stuck "sending" would freeze the
+     * mic forever. A non-EditError throw (EditErrors are handled in-core as error
+     * entries) is surfaced rather than swallowed. */
+    async function runTurn(text: string, sttSeconds?: number): Promise<void> {
+      set((s) => ({
+        app: {
+          ...s.app,
+          chat: [
+            ...s.app.chat,
+            { kind: "user_message", id: newId(), at: now(), text },
+          ],
+        },
+        sttPhase: "sending",
+      }));
+
+      try {
         const context = assembleContext(get().app);
         const documentId = get().app.activeDocument?.id;
         let result;
         try {
           result = await deps.api.turn({
-            transcript: trimmed,
+            transcript: text,
             context,
             ...(documentId !== undefined ? { documentId } : {}),
             ...(sttSeconds !== undefined ? { sttSeconds } : {}),
           });
         } catch (err) {
-          pushEntry({
-            kind: "error",
-            id: newId(),
-            at: now(),
-            message: `Turn request failed: ${err instanceof Error ? err.message : String(err)}`,
-          });
-          set({ sttPhase: "idle", lastError: "Turn request failed." });
+          surfaceError(`Turn request failed: ${errMessage(err)}`);
           return;
         }
 
@@ -309,17 +511,55 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             at: now(),
             message: `Invalid LLM response: ${parsed.error}`,
           });
-          set((s) => ({
-            usages: [...s.usages, result.usage],
-            sttPhase: "idle",
-            lastError: parsed.error,
-          }));
+          // Record usage: the call was still billed even though we can't apply it.
+          set((s) => ({ usages: [...s.usages, result.usage], lastError: parsed.error }));
           return;
         }
 
         applyResponse(parsed.response, result.usage);
+      } catch (err) {
+        surfaceError(`Turn failed: ${errMessage(err)}`);
+      } finally {
         set({ sttPhase: "idle" });
+      }
+    }
+
+    return {
+      app: initialState(deps.initial),
+      usages: [],
+      vadActive: false,
+      sttPhase: "idle",
+      listeningPhase: "idle",
+      micStarted: false,
+      lastError: null,
+      scrollCommand: null,
+
+      startMic() {
+        set({ micStarted: true });
+        get().dispatch({ type: "set_listening", state: "listening" });
       },
+
+      setVoiceIndicator({ vad, finalizing }) {
+        set({ vadActive: vad, listeningPhase: finalizing ? "finalizing" : "idle" });
+      },
+
+      dispatch(action, author = "user") {
+        const result = applyAction(get().app, action, ctxFor(author));
+        set({ app: result.state, lastError: result.error ?? null });
+        runEffects(result.effects);
+      },
+
+      applyResponse,
+
+      submitTranscript(text, sttSeconds) {
+        const trimmed = text.trim();
+        if (!trimmed) return Promise.resolve();
+        // Queue the utterance; the returned promise resolves when THIS turn has
+        // been fully processed (not merely enqueued), so callers can await it.
+        return enqueueTurn(trimmed, sttSeconds);
+      },
+
+      flushPersistQueue: () => drainPromise,
 
       setDocumentScroll(scroll) {
         set((s) => ({ app: { ...s.app, documentScroll: scroll } }));

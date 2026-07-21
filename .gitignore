@@ -8,3 +8,6 @@ coverage/
 !.env.example
 .DS_Store
 test-costs.jsonl
+
+# Large downloaded Vosk wake-word model (fetch via scripts/fetch-vosk-model.sh)
+apps/web/public/models/

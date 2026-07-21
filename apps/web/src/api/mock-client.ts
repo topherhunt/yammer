@@ -6,7 +6,12 @@ import type {
   Version,
 } from "@yammer/shared";
 import { zeroUsage } from "@yammer/shared";
-import type { ApiClient, DocumentPayload, TurnRequest } from "./client";
+import type {
+  ApiClient,
+  DocumentPayload,
+  PersistUndo,
+  TurnRequest,
+} from "./client";
 
 // In-memory API for local dev, demos, and tests. No network, no spend. Turn
 // responses are scriptable so tests can drive exact LLM behavior; document
@@ -19,6 +24,11 @@ export interface MockApiConfig {
   documents?: DocumentMeta[];
   documentPayloads?: Record<string, DocumentPayload>;
   researchSummary?: string;
+  /** Called on every persistVersion attempt (1-based `attempt`) before the
+   * version is recorded; throw to simulate a transient failure or a 409 (throw
+   * an error carrying `.status`). Lets tests exercise the persist queue's retry
+   * and reconcile paths without a real network. */
+  persistFailer?: (attempt: number, version: Version) => void;
 }
 
 const emptyResult: LlmResult = { actions: [], usage: zeroUsage, raw: {} };
@@ -32,8 +42,14 @@ export class MockApiClient implements ApiClient {
 
   /** Recorded calls, so tests can assert what the edge sent to the backend. */
   readonly persistedVersions: Version[] = [];
+  /** Undo timeline sent with each successful persistVersion (parallel to
+   * persistedVersions), so tests can assert the N3 undo state was sent. */
+  readonly persistedUndo: (PersistUndo | undefined)[] = [];
   readonly persistedSettings: Settings[] = [];
   readonly turnRequests: TurnRequest[] = [];
+  /** Total persistVersion attempts (including ones that threw), for retry tests. */
+  persistAttempts = 0;
+  private readonly persistFailer?: (attempt: number, version: Version) => void;
 
   constructor(config: MockApiConfig = {}) {
     this.turnQueue = [...(config.turnResponses ?? [])];
@@ -41,6 +57,7 @@ export class MockApiClient implements ApiClient {
     this.documents = [...(config.documents ?? [])];
     this.payloads = { ...(config.documentPayloads ?? {}) };
     this.researchSummary = config.researchSummary ?? "No findings.";
+    this.persistFailer = config.persistFailer;
   }
 
   async turn(req: TurnRequest): Promise<LlmResult> {
@@ -82,8 +99,11 @@ export class MockApiClient implements ApiClient {
     );
   }
 
-  async persistVersion(version: Version): Promise<void> {
+  async persistVersion(version: Version, undo?: PersistUndo): Promise<void> {
+    this.persistAttempts += 1;
+    if (this.persistFailer) this.persistFailer(this.persistAttempts, version);
     this.persistedVersions.push(version);
+    this.persistedUndo.push(undo);
   }
 
   async persistSettings(settings: Settings): Promise<void> {

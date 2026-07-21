@@ -62,4 +62,16 @@ describe("applyInsert", () => {
       applyInsert("hello", { afterFind: "zzz" }, "!"),
     ).toThrow(EditError);
   });
+
+  it("throws on an ambiguous insert anchor instead of taking the first", () => {
+    expect(() =>
+      applyInsert("Dear Bob, Dear Sue,", { afterFind: "Dear " }, "!"),
+    ).toThrow(/Ambiguous insert anchor/);
+  });
+
+  it("inserts after a specified occurrence when the anchor repeats", () => {
+    expect(
+      applyInsert("Dear Bob, Dear Sue,", { afterFind: "Dear ", occurrence: 2 }, "!"),
+    ).toBe("Dear Bob, Dear !Sue,");
+  });
 });

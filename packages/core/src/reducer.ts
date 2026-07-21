@@ -154,8 +154,13 @@ function commitNavigation(
   steps: number,
 ): ReduceResult {
   const doc = state.activeDocument!;
-  const targetId = state.undoStack[targetCursor]!;
-  const target = findVersion(state.history, targetId)!;
+  // Defensive: an inconsistent undo timeline (e.g. rebuilt from a partial load)
+  // should surface an error, never crash the turn on a non-null assertion.
+  const targetId = state.undoStack[targetCursor];
+  const target = targetId ? findVersion(state.history, targetId) : null;
+  if (!target) {
+    return errorResult(state, ctx, "Undo timeline is inconsistent; cannot navigate.");
+  }
   const version = createVersion({
     id: ctx.newId(),
     createdAt: ctx.now(),
@@ -239,6 +244,16 @@ export function applyAction(
       const target = findVersion(state.history, action.versionId);
       if (!target) {
         return errorResult(state, ctx, `Version not found: ${action.versionId}`);
+      }
+      // Provenance integrity: the restored fragment must actually be text from
+      // the named version, or the audit log would record a "restore" of text
+      // that never existed there.
+      if (!target.fullText.includes(action.replace)) {
+        return errorResult(
+          state,
+          ctx,
+          `Restore fragment not found in version ${target.seq}; refusing to record an unfaithful restore.`,
+        );
       }
       let newText: string;
       try {

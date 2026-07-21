@@ -36,4 +36,13 @@ describe("computeDiff", () => {
   it("treats writing into an empty document as all additions", () => {
     expect(computeDiff("", "fresh")).toEqual([{ kind: "add", value: "fresh" }]);
   });
+
+  it("falls back to a linear coarse diff above the LCS size cap (no OOM)", () => {
+    const big = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join("\n");
+    const changed = big + "\nEXTRA";
+    expect(computeDiff(big, changed)).toEqual([
+      { kind: "context", value: big },
+      { kind: "add", value: "EXTRA" },
+    ]);
+  });
 });

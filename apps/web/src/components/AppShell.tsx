@@ -4,6 +4,7 @@ import { useTheme } from "../theme/useTheme";
 import { ChatSidebar } from "./ChatSidebar";
 import { DocumentPanel } from "./DocumentPanel";
 import { DialogHost } from "./DialogHost";
+import { TapToStartGate } from "./TapToStartGate";
 
 // Two-panel shell: chat sidebar (left) + document (right) on desktop; a single
 // panel with a voice/tap toggle on mobile (iOS-first). Theme follows the OS by
@@ -82,6 +83,7 @@ export function AppShell() {
       </div>
 
       <DialogHost />
+      <TapToStartGate />
     </div>
   );
 }

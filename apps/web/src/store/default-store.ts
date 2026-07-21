@@ -1,8 +1,11 @@
 import { createVersion } from "@yammer/core";
+import type { ListeningState, SfxSound } from "@yammer/shared";
 import type { ApiClient } from "../api/client";
 import { FetchApiClient } from "../api/fetch-client";
 import { MockApiClient } from "../api/mock-client";
 import { MockStt } from "../stt/mock-stt";
+import type { Sfx } from "../voice/interfaces";
+import type { VoiceController } from "../voice/voice-controller";
 import { createAppStore } from "./store";
 import type { AppStore } from "./store";
 import type { StoreApi } from "zustand/vanilla";
@@ -37,7 +40,27 @@ export function getDefaultStore(): StoreApi<AppStore> {
     // Real backend: the fetch client is authoritative-store-backed and carries the
     // session cookie. No seed data -- documents come from the server.
     const api: ApiClient = new FetchApiClient(apiBase);
-    singleton = createAppStore({ api, stt: new MockStt() });
+
+    // Wire the real voice pipeline. It is late-bound through a dynamic import so
+    // the browser-only mic/VAD adapters (and onnxruntime-web) never load in the
+    // test/module graph. Until it resolves, the forwarding shims below are inert.
+    let voice: VoiceController | null = null;
+    let voiceSfx: Sfx | null = null;
+    const store = createAppStore({
+      api,
+      stt: new MockStt(), // inert here; the VoiceController owns real capture
+      sfx: {
+        preload: async () => {},
+        play: (sound: SfxSound) => voiceSfx?.play(sound),
+      },
+      onSetListening: (state: ListeningState) => voice?.setListening(state),
+    });
+    singleton = store;
+    void import("../voice/create-voice").then(({ createVoice }) => {
+      const created = createVoice(store, apiBase);
+      voice = created.controller;
+      voiceSfx = created.sfx;
+    });
     return singleton;
   }
 

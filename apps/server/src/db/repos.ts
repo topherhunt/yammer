@@ -4,7 +4,7 @@
 // the API route handlers depend on.
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import { createVersion } from "@yammer/core";
 import {
@@ -27,6 +27,30 @@ import { documents, schema, turns, users, versions } from "./schema";
  * this type, so the widening is internal to apps/server.
  */
 export type Database = PgDatabase<any, typeof schema>;
+
+/**
+ * Raised when a create/rename would collide with an existing document name for
+ * the same user (case-insensitively). The route layer maps this to a 409 -- voice
+ * addressing ("open my journal") depends on names being unambiguous (plan.md sec 4).
+ */
+export class DuplicateNameError extends Error {
+  constructor(public readonly documentName: string) {
+    super(`a document named "${documentName}" already exists`);
+    this.name = "DuplicateNameError";
+  }
+}
+
+/** Postgres unique-violation SQLSTATE. pg-mem sets the same `.code` (verified). */
+export const PG_UNIQUE_VIOLATION = "23505";
+
+/** True when an error is a Postgres/pg-mem unique-constraint violation. */
+export function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === PG_UNIQUE_VIOLATION
+  );
+}
 
 /** One `users` row per Google login; owns a JSONB `settings` bag. */
 export interface User {
@@ -206,6 +230,21 @@ export function createRepos(db: Database): Repos {
     },
   };
 
+  // Case-insensitive name lookup, the primitive behind duplicate-name detection.
+  // Returns the ids of the user's documents whose name matches `name` ignoring case.
+  async function idsWithName(userId: string, name: string): Promise<string[]> {
+    const rows = await db
+      .select({ id: documents.id })
+      .from(documents)
+      .where(
+        and(
+          eq(documents.userId, userId),
+          sql`lower(${documents.name}) = ${name.toLowerCase()}`,
+        ),
+      );
+    return rows.map((r) => r.id);
+  }
+
   const documentsRepo: DocumentsRepo = {
     async list(userId, sort) {
       // Date sorts render descending (plan.md sec 4); name sorts ascending.
@@ -270,7 +309,26 @@ export function createRepos(db: Database): Repos {
     async create(userId, input) {
       const now = new Date().toISOString();
       const documentId = randomUUID();
-      const name = input.name ?? "Untitled";
+
+      // Names are case-insensitively unique per user (plan.md sec 4). An explicit
+      // colliding name is a caller error -> DuplicateNameError (the route -> 409).
+      // A nameless "new document" auto-disambiguates ("Untitled", "Untitled 2", ...)
+      // so the bare voice command never fails against the unique index.
+      let name: string;
+      if (input.name !== undefined) {
+        if ((await idsWithName(userId, input.name)).length > 0) {
+          throw new DuplicateNameError(input.name);
+        }
+        name = input.name;
+      } else {
+        name = "Untitled";
+        let n = 1;
+        while ((await idsWithName(userId, name)).length > 0) {
+          n += 1;
+          name = `Untitled ${n}`;
+        }
+      }
+
       const initial = createVersion({
         id: randomUUID(),
         createdAt: now,
@@ -280,6 +338,19 @@ export function createRepos(db: Database): Repos {
         kind: "create",
         newText: "",
         summary: "Created document",
+      });
+      // Insert the document BEFORE the version: versions.document_id is now an FK to
+      // documents(id), so the parent row must exist first. (current_version_id has no
+      // FK, so pointing it at the not-yet-inserted version id is fine.)
+      await db.insert(documents).values({
+        id: documentId,
+        userId,
+        name,
+        createdAt: now,
+        updatedAt: now,
+        currentVersionId: initial.id,
+        undoStack: [initial.id],
+        undoCursor: 0,
       });
       await db.insert(versions).values({
         id: initial.id,
@@ -295,16 +366,6 @@ export function createRepos(db: Database): Repos {
         createdAt: initial.createdAt,
         restoredFromVersionId: null,
       });
-      await db.insert(documents).values({
-        id: documentId,
-        userId,
-        name,
-        createdAt: now,
-        updatedAt: now,
-        currentVersionId: initial.id,
-        undoStack: [initial.id],
-        undoCursor: 0,
-      });
       return {
         id: documentId,
         name,
@@ -315,6 +376,13 @@ export function createRepos(db: Database): Repos {
     },
 
     async rename(userId, documentId, name) {
+      // Reject a case-insensitive collision with a DIFFERENT document (renaming a
+      // doc to its own current name, or a case-only change, is allowed).
+      const clashing = (await idsWithName(userId, name)).filter(
+        (id) => id !== documentId,
+      );
+      if (clashing.length > 0) throw new DuplicateNameError(name);
+
       const now = new Date().toISOString();
       const updated = await db
         .update(documents)
@@ -354,6 +422,26 @@ export function createRepos(db: Database): Repos {
     },
 
     async append(userId, version, undo) {
+      // Ownership backstop: never insert a version against a document the caller
+      // does not own (do not trust the route to have checked). A version's userId
+      // FK alone would accept a foreign document; this asserts the pairing.
+      const ownerRows = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(
+          and(
+            eq(documents.userId, userId),
+            eq(documents.id, version.documentId),
+          ),
+        );
+      if (!ownerRows[0]) {
+        throw new Error(
+          `Cannot append version: document ${version.documentId} not found for this user.`,
+        );
+      }
+
+      // Insert the version. A UNIQUE(document_id, seq) violation from a truly
+      // concurrent append surfaces here (23505) for the route to map to a 409.
       const inserted = await db
         .insert(versions)
         .values({
@@ -376,7 +464,7 @@ export function createRepos(db: Database): Repos {
       // fullText). When the client supplies its undo timeline we persist it too;
       // otherwise undoStack/undoCursor are left untouched (a bare append cannot
       // tell a forward edit from an undo/redo navigation).
-      await db
+      const advanced = await db
         .update(documents)
         .set({
           currentVersionId: version.id,
@@ -390,7 +478,16 @@ export function createRepos(db: Database): Repos {
             eq(documents.userId, userId),
             eq(documents.id, version.documentId),
           ),
+        )
+        .returning({ id: documents.id });
+      // A head advance that matched no row means the version "took" but the
+      // document head did not move -- an edit that silently did not persist. Fail
+      // loudly rather than return a version that isn't actually the head.
+      if (advanced.length !== 1) {
+        throw new Error(
+          `Head advance for document ${version.documentId} affected ${advanced.length} rows, expected 1.`,
         );
+      }
       return toVersion(inserted[0]!);
     },
   };
