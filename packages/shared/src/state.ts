@@ -220,9 +220,12 @@ export const defaultSettings: Settings = {
   loadDocSort: "updated",
   sfxEnabled: true,
   silenceThresholdMs: 800,
-  // Small barge-in cancel window after end-of-speech. Kept short because coalescing
-  // already folds a resumed utterance into the next turn, so this needn't be large.
-  optimisticSendMs: 200,
+  // The ONLY grace period is the VAD redemption (~1500ms of silence before we
+  // decide you've stopped). This extra post-end-of-speech "optimistic send" window
+  // is 0: it added latency on top of the redemption for no benefit now that
+  // coalescing folds a resumed utterance into the next turn. Total stop->send delay
+  // is therefore just the redemption (VITE_VAD_REDEMPTION_MS, default 1500ms).
+  optimisticSendMs: 0,
   chatCompactThreshold: 24,
 };
 
