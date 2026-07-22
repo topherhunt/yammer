@@ -25,6 +25,7 @@ import {
 import type { Ctx } from "@yammer/core";
 import type { ApiClient, PersistUndo } from "../api/client";
 import { copyToClipboard, downloadFile, playSfx } from "./browser-effects";
+import { reportClientDebug } from "../util/debug";
 
 // The Zustand store is the edge: it holds AppState, drives the pure reducer with
 // validated actions, and carries out the Effect[] the reducer returns (persist,
@@ -65,6 +66,10 @@ export interface AppStore {
    * composer until the utterance is submitted as a message. Empty when not
    * mid-utterance. */
   interimTranscript: string;
+  /** The id of the LAST user message included in the LLM turn currently in flight,
+   * so the view can show a "working" spinner beside it. Messages after it are queued
+   * (spoken while the turn ran) and not yet seen by the model. Null when idle. */
+  workingAnchorId: string | null;
   sttPhase: SttPhase;
   /** Machine-derived: "finalizing" while an utterance is finalizing or in the
    * pre-send grace window (drives the radial). Distinct from `sttPhase`, which
@@ -193,6 +198,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     function surfaceError(message: string): void {
       pushEntry({ kind: "error", id: newId(), at: now(), message });
       set({ lastError: message });
+      // Mirror every surfaced error into the file-based debug log so a bug report
+      // doesn't require copy-pasting the chat sidebar (see reportClientDebug).
+      reportClientDebug("error", { message });
     }
 
     /** Run a fire-and-forget async effect, surfacing any rejection instead of
@@ -289,7 +297,20 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           await deps.api.persistVersion(item.version, item.undo, item.documentName);
           return "ok";
         } catch (err) {
-          if (httpStatus(err) === 409) return "conflict";
+          if (httpStatus(err) === 409) {
+            // A seq conflict on a SINGLE-device session is almost certainly our own
+            // client/server seq tracking slipping, not a real other-device edit.
+            // Log the specifics (which version seq collided) so it is diagnosable.
+            reportClientDebug("persist-conflict", {
+              documentId: item.version.documentId,
+              versionId: item.version.id,
+              seq: item.version.seq,
+              kind: item.version.kind,
+              status: 409,
+              detail: errMessage(err),
+            });
+            return "conflict";
+          }
           if (attempt < MAX_PERSIST_TRIES - 1) await delay(retryDelayMs(attempt));
         }
       }
@@ -357,9 +378,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           id: newId(),
           at: now(),
           message:
-            "This document changed on another device, so your last edit could not be saved. It has been reloaded from the server -- please re-apply your change.",
+            "Your last edit couldn't be saved because the document was out of sync, so it's been reloaded from the server -- please re-apply that change. (If this recurs on a single device, it's a bug we're tracking.)",
         });
-        set({ lastError: "Document changed elsewhere; reloaded from the server." });
+        set({ lastError: "Edit could not be saved (out of sync); reloaded from the server." });
       } catch (err) {
         surfaceError(
           `Reloading the document after a sync conflict failed: ${errMessage(err)}`,
@@ -559,33 +580,41 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     // re-assembles SituationalContext against the LATEST committed state, so the
     // second turn sees the first turn's edits instead of a stale snapshot.
 
-    interface QueuedTurn {
+    interface PendingUtterance {
       text: string;
+      id: string; // the user_message id (already shown as a bubble)
       sttSeconds?: number;
       resolve: () => void;
     }
-    const turnQueue: QueuedTurn[] = [];
+    // Utterances awaiting the model. Each is ALREADY a chat bubble; when the loop is
+    // free it COALESCES every pending utterance into ONE turn, so a follow-up spoken
+    // while the model was working is folded into the same request (full context)
+    // rather than firing a stale, fragmented second turn. New utterances that arrive
+    // during an in-flight turn simply wait for the next coalesced batch.
+    const pendingUtterances: PendingUtterance[] = [];
     let processingTurns = false;
 
-    function enqueueTurn(text: string, sttSeconds?: number): Promise<void> {
-      return new Promise<void>((resolve) => {
-        turnQueue.push({ text, sttSeconds, resolve });
-        if (!processingTurns) {
-          processingTurns = true;
-          void processTurnQueue();
-        }
-      });
+    function kickTurns(): void {
+      if (processingTurns) return;
+      processingTurns = true;
+      // Defer to a microtask so utterances submitted in the SAME tick (rapid speech,
+      // two finals together) all land in `pendingUtterances` before the first batch
+      // is taken -- otherwise the loop would grab just the first and not coalesce.
+      queueMicrotask(() => void processTurns());
     }
 
-    async function processTurnQueue(): Promise<void> {
+    async function processTurns(): Promise<void> {
       try {
-        while (turnQueue.length > 0) {
-          const item = turnQueue[0]!;
+        while (pendingUtterances.length > 0) {
+          const batch = pendingUtterances.splice(0, pendingUtterances.length);
+          const combined = batch.map((u) => u.text).join("\n");
+          const batchIds = new Set(batch.map((u) => u.id));
+          const seconds = batch.reduce((sum, u) => sum + (u.sttSeconds ?? 0), 0);
+          const anchorId = batch[batch.length - 1]!.id;
           try {
-            await runTurn(item.text, item.sttSeconds);
+            await runTurn(combined, batchIds, anchorId, seconds || undefined);
           } finally {
-            turnQueue.shift();
-            item.resolve();
+            for (const u of batch) u.resolve();
           }
         }
       } finally {
@@ -593,27 +622,33 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       }
     }
 
-    /** Run a single turn. sttPhase is reset in a `finally` no matter what fails
-     * -- the store is a module singleton, so a stuck "sending" would freeze the
-     * mic forever. A non-EditError throw (EditErrors are handled in-core as error
-     * entries) is surfaced rather than swallowed. */
-    async function runTurn(text: string, sttSeconds?: number): Promise<void> {
-      set((s) => ({
-        app: {
-          ...s.app,
-          chat: [
-            ...s.app.chat,
-            { kind: "user_message", id: newId(), at: now(), text },
-          ],
-        },
-        // The utterance is now a message bubble; clear the live preview.
+    /** Run one (possibly coalesced) turn. The user messages are ALREADY in the chat;
+     * `batchIds` are this turn's own messages, excluded from the recent-chat history
+     * (they are the turn's input, not prior context). sttPhase + workingAnchorId are
+     * reset in a `finally` no matter what fails -- the store is a module singleton,
+     * so a stuck "sending" would freeze the mic forever. */
+    async function runTurn(
+      text: string,
+      batchIds: Set<string>,
+      anchorId: string,
+      sttSeconds?: number,
+    ): Promise<void> {
+      set({
         interimTranscript: "",
+        workingAnchorId: anchorId,
         sttPhase: "sending",
-      }));
+      });
 
       try {
-        const context = assembleContext(get().app);
-        const documentId = get().app.activeDocument?.id;
+        const app = get().app;
+        // Exclude this turn's own just-added messages from the recent-chat history;
+        // they are the transcript, not prior context (avoids sending them twice).
+        const context = assembleContext(
+          batchIds.size
+            ? { ...app, chat: app.chat.filter((e) => !batchIds.has(e.id)) }
+            : app,
+        );
+        const documentId = app.activeDocument?.id;
 
         // A turn can fail two ways -- the request itself (network / 502 upstream) or
         // an invalid model response -- and BOTH warrant a couple of retries: a
@@ -645,6 +680,11 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           });
           if (parsed.ok) {
             applyResponse(parsed.response, result.usage);
+            // A soft chirp when the AI responds with an action or a message, so the
+            // user knows their turn landed without watching the sidebar.
+            if (parsed.response.actions.length > 0 || parsed.response.chatMessage) {
+              sfx("receive");
+            }
             return;
           }
 
@@ -671,7 +711,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       } catch (err) {
         surfaceError(`Turn failed: ${errMessage(err)}`);
       } finally {
-        set({ sttPhase: "idle" });
+        set({ sttPhase: "idle", workingAnchorId: null });
       }
     }
 
@@ -681,6 +721,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       vadActive: false,
       micLevel: 0,
       interimTranscript: "",
+      workingAnchorId: null,
       sttPhase: "idle",
       listeningPhase: "idle",
       micStarted: false,
@@ -784,9 +825,22 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       submitTranscript(text, sttSeconds) {
         const trimmed = text.trim();
         if (!trimmed) return Promise.resolve();
-        // Queue the utterance; the returned promise resolves when THIS turn has
-        // been fully processed (not merely enqueued), so callers can await it.
-        return enqueueTurn(trimmed, sttSeconds);
+        // Show the message as a bubble IMMEDIATELY (so several quick utterances stack
+        // visibly), then queue it. The loop coalesces all pending utterances into one
+        // turn; the returned promise resolves once THIS utterance's turn has fully
+        // processed, so callers can await it.
+        const id = newId();
+        set((s) => ({
+          app: {
+            ...s.app,
+            chat: [...s.app.chat, { kind: "user_message", id, at: now(), text: trimmed }],
+          },
+          interimTranscript: "",
+        }));
+        return new Promise<void>((resolve) => {
+          pendingUtterances.push({ text: trimmed, id, sttSeconds, resolve });
+          kickTurns();
+        });
       },
 
       flushPersistQueue: () => drainPromise,

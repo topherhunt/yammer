@@ -105,6 +105,35 @@ describe("submitTranscript turn loop", () => {
     expect(kinds).toContain("edit");
   });
 
+  it("coalesces utterances spoken back-to-back into ONE turn with the combined text", async () => {
+    const { store, api } = makeStore({
+      api: {
+        turnResponder: () => ({ actions: [], usage, raw: {} }),
+      },
+    });
+
+    // Two utterances submitted before the loop yields: both queue together.
+    const p1 = store.getState().submitTranscript("first part");
+    const p2 = store.getState().submitTranscript("second part");
+    await Promise.all([p1, p2]);
+
+    // Each shows as its own bubble immediately (a visible stack)...
+    const userTexts = store
+      .getState()
+      .app.chat.filter((e) => e.kind === "user_message")
+      .map((e) => (e as { text: string }).text);
+    expect(userTexts).toEqual(["first part", "second part"]);
+
+    // ...but the model was asked ONCE, with both folded into a single request, so it
+    // never works on a stale half of the thought.
+    expect(api.turnRequests).toHaveLength(1);
+    expect(api.turnRequests[0]!.transcript).toBe("first part\nsecond part");
+    // The coalesced turn's own messages are NOT duplicated into recent-chat history.
+    const recent = api.turnRequests[0]!.context.recentChat ?? [];
+    expect(recent.some((m) => (m as { text?: string }).text?.includes("first part"))).toBe(false);
+    expect(store.getState().workingAnchorId).toBeNull(); // cleared when done
+  });
+
   it("retries an invalid LLM response a few times, then surfaces a chat error", async () => {
     let calls = 0;
     const { store } = makeStore({
@@ -329,10 +358,10 @@ describe("durable version persistence", () => {
     expect(app.history.map((v) => v.id)).toEqual(["srv-1"]);
     expect(app.undoStack).toEqual(["srv-1"]);
     expect(app.undoCursor).toBe(0);
-    // The user is told, loudly, that the document changed elsewhere.
+    // The user is told, loudly, that their edit couldn't be saved + was reloaded.
     expect(app.chat.at(-1)).toMatchObject({
       kind: "error",
-      message: expect.stringMatching(/changed on another device/i),
+      message: expect.stringMatching(/out of sync|couldn't be saved/i),
     });
     expect(store.getState().lastError).toMatch(/reloaded from the server/i);
   });
@@ -512,7 +541,7 @@ describe("early-tap race (voice pipeline not yet ready)", () => {
 });
 
 describe("serialized voice turns", () => {
-  it("processes rapid utterances one at a time so the second sees the first's edit", async () => {
+  it("a turn started after a prior one completes sees the prior turn's committed edit", async () => {
     const { store, api } = makeStore({
       api: {
         turnResponses: [
@@ -522,13 +551,12 @@ describe("serialized voice turns", () => {
       },
     });
 
-    // Fire two utterances back-to-back without awaiting the first.
-    const p1 = store.getState().submitTranscript("first");
-    const p2 = store.getState().submitTranscript("second");
-    await Promise.all([p1, p2]);
+    // AWAIT the first fully before the second, so they are two DISTINCT turns (not
+    // coalesced). Each re-assembles context against the latest committed state.
+    await store.getState().submitTranscript("first");
+    await store.getState().submitTranscript("second");
 
-    // Second turn's edit anchor ("ONE") only existed because the first turn had
-    // already committed -- proving strict sequencing, not a race.
+    // The second turn's edit anchor ("ONE") existed only because the first committed.
     expect(store.getState().app.activeDocument?.text).toBe("the cat sat TWO");
     expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(false);
     // The second turn re-assembled context against the first turn's result.

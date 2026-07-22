@@ -94,6 +94,14 @@
     }
   }
 
+  /* Small spinner beside the chat message the model is actively working on. */
+  .qa-working-spinner {
+    border-radius: 9999px;
+    border: 2px solid rgb(156 163 175 / 0.4);
+    border-top-color: rgb(59 130 246);
+    animation: qa-radial-spin 0.8s linear infinite;
+  }
+
   /* Radial "working" spinner shown during finalize/send. */
   .qa-radial {
     position: absolute;

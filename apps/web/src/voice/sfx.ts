@@ -18,9 +18,13 @@ interface ToneSpec {
 // Distinct, short, non-intrusive tones. `unmute` rises and `mute` falls so the
 // two are unmistakable even without looking.
 const TONES: Record<SfxSound, ToneSpec> = {
-  send: { from: 660, to: 660, durationMs: 90, gain: 0.05 },
-  unmute: { from: 660, to: 990, durationMs: 140, gain: 0.06 },
-  mute: { from: 520, to: 300, durationMs: 160, gain: 0.06 },
+  // Softer, quick chirps for the frequent message events (send / AI response)...
+  send: { from: 660, to: 720, durationMs: 80, gain: 0.035 },
+  receive: { from: 540, to: 480, durationMs: 110, gain: 0.035 },
+  // ...and louder, unmistakable notes for the deliberate mute/unmute state changes
+  // (2x the message chirps -- the user asked for these to be more prominent).
+  unmute: { from: 660, to: 990, durationMs: 140, gain: 0.12 },
+  mute: { from: 520, to: 300, durationMs: 160, gain: 0.12 },
   error: { from: 220, to: 180, durationMs: 200, gain: 0.06 },
 };
 

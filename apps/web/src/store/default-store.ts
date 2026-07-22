@@ -9,6 +9,29 @@ import type { VoiceController } from "../voice/voice-controller";
 import { createAppStore } from "./store";
 import type { AppStore } from "./store";
 import type { StoreApi } from "zustand/vanilla";
+import { randomGreeting } from "../util/greeting";
+
+/** Seed a fresh session with a short, randomly-composed AI greeting so the user is
+ * welcomed and nudged to start talking. Only when the chat is empty. */
+function seedGreeting(store: StoreApi<AppStore>): void {
+  store.setState((s) =>
+    s.app.chat.length === 0
+      ? {
+          app: {
+            ...s.app,
+            chat: [
+              {
+                kind: "ai_message",
+                id: `greeting-${Math.random().toString(36).slice(2)}`,
+                at: new Date().toISOString(),
+                text: randomGreeting(),
+              },
+            ],
+          },
+        }
+      : s,
+  );
+}
 
 // The app's default store for local dev/demo. When VITE_API_BASE is set it talks
 // to the real backend via FetchApiClient; otherwise it runs entirely on mocks
@@ -68,6 +91,7 @@ export function getDefaultStore(): StoreApi<AppStore> {
       voiceReady: false,
     });
     singleton = store;
+    seedGreeting(store);
     void import("../voice/create-voice").then(({ createVoice }) => {
       const created = createVoice(store, apiBase);
       voice = created.controller;
@@ -122,5 +146,6 @@ export function getDefaultStore(): StoreApi<AppStore> {
       undoCursor: 0,
     },
   });
+  seedGreeting(singleton);
   return singleton;
 }

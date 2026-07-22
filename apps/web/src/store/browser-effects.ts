@@ -29,6 +29,7 @@ export async function copyToClipboard(text: string): Promise<void> {
 // Kept intentionally minimal here; richer SFX design is a Phase 6 concern.
 const TONES: Record<SfxSound, number> = {
   send: 660,
+  receive: 540,
   unmute: 880,
   mute: 330,
   error: 220,

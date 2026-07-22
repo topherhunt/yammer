@@ -182,7 +182,7 @@ export interface AppState {
 }
 
 /** Sounds the UI plays; requested by the reducer, produced at the edge. */
-export type SfxSound = "send" | "mute" | "unmute" | "error";
+export type SfxSound = "send" | "receive" | "mute" | "unmute" | "error";
 
 /**
  * Side-effect requests. The reducer stays pure by returning these instead of

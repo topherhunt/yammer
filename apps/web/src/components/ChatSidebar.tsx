@@ -112,6 +112,9 @@ function entryWrapperClass(entry: ChatEntry): string {
 
 export function ChatSidebar() {
   const chat = useAppStore((s) => s.app.chat);
+  // The message the model is currently working on (last in the in-flight batch).
+  // Messages after it are queued -- spoken while the turn ran, not yet seen.
+  const workingAnchorId = useAppStore((s) => s.workingAnchorId);
   const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
@@ -153,19 +156,36 @@ export function ChatSidebar() {
             Say something to start writing.
           </li>
         ) : (
-          chat.map((entry) => (
-            <li
-              key={entry.id}
-              // Each new entry grows from height 0 to its natural height over 300ms
-              // (grid-rows 0fr->1fr; see .qa-chat-anim). Alignment lives here on the
-              // flex item; the bubble styling lives on the inner content.
-              className={cx("qa-chat-anim", entryWrapperClass(entry))}
-            >
-              <div className="qa-chat-anim-inner">
-                <ChatMessageView entry={entry} />
-              </div>
-            </li>
-          ))
+          chat.map((entry) => {
+            const working = entry.id === workingAnchorId;
+            return (
+              <li
+                key={entry.id}
+                // Each new entry grows from height 0 to its natural height over 300ms
+                // (grid-rows 0fr->1fr; see .qa-chat-anim). Alignment lives here on the
+                // flex item; the bubble styling lives on the inner content.
+                className={cx("qa-chat-anim", entryWrapperClass(entry))}
+              >
+                <div className="qa-chat-anim-inner">
+                  {working ? (
+                    // Spinner beside the bubble the model is working on right now.
+                    <div className="flex items-end justify-end gap-1.5">
+                      <span
+                        role="status"
+                        aria-label="The AI is working on this message"
+                        className="qa-working-spinner mb-1 h-3.5 w-3.5 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <ChatMessageView entry={entry} />
+                      </div>
+                    </div>
+                  ) : (
+                    <ChatMessageView entry={entry} />
+                  )}
+                </div>
+              </li>
+            );
+          })
         )}
       </ul>
       <ChatComposer />

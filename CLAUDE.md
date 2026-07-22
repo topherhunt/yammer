@@ -87,6 +87,8 @@ Central helper: `apps/server/src/debug.ts` (`debugLog(category, data)`).
 - **Creation is client-authoritative, like every edit.** `new_document` builds the doc + its seq-0 `create` version in-state; that version persists through the normal queue and the server auto-creates the row from it (`documentName` rides along). Do NOT add a separate server-authoritative "mint a document" round-trip.
 - **STT interim arrives as incremental deltas** -- accumulate them (server bridge) before showing; don't render each fragment as the whole transcript.
 - **VAD end-of-speech is `redemptionMs` in `vad.ts`** (`VITE_VAD_REDEMPTION_MS`). Too low cuts people off mid-sentence; keep it generous (currently 2000ms).
+- **One user, one device at a time** (he may switch devices between sessions, never simultaneously). All content lives in Postgres (durable, loadable anywhere) -- that requirement is real. The seq-conflict / "reloaded from the server" machinery is a lightweight CORRUPTION GUARD, not multi-device conflict resolution; on a single device it should NEVER fire. If it does, it's a client/server seq-sync bug -- do not "support simultaneous devices," fix the desync.
+- **Turns coalesce, and never overlap.** Utterances become chat bubbles immediately; the loop folds all pending ones into ONE LLM turn (so a follow-up spoken mid-turn joins the same request). `workingAnchorId` marks the last message in the in-flight turn (spinner). Don't reintroduce per-utterance turns that could fire on stale state.
 
 ## Collaboration
 
