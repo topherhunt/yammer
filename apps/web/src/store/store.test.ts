@@ -195,24 +195,21 @@ describe("dialog + document effects", () => {
     expect(app.chat.at(-1)?.kind).toBe("restore");
   });
 
-  it("creates a fresh document server-side and resets the spend meter", async () => {
-    const { store, api } = makeStore();
+  it("creates a fresh document IN-STATE synchronously and resets the spend meter", () => {
+    const { store } = makeStore();
     store.getState().usages.push({ sttSeconds: 9, inputTokens: 9, cachedInputTokens: 0, outputTokens: 9 });
     store.getState().dispatch({ type: "new_document", name: "Fresh" });
-    // Creation is an async server round-trip now (not a local mint), so let it settle.
-    await flush();
 
+    // Synchronous: the reducer creates the doc + its seq-0 version in-state, so a
+    // same-turn edit and the NEXT turn see it immediately (no async gap that would
+    // spawn a duplicate document).
     const state = store.getState();
     expect(state.app.activeDocument?.name).toBe("Fresh");
     expect(state.app.activeDocument?.text).toBe("");
     expect(state.app.history).toHaveLength(1);
-    expect(state.usages).toEqual([]);
-    // The document was created THROUGH the server (POST /api/documents), so the
-    // adopted id is real and later version saves won't 404. This is the exact
-    // regression from the third browser test.
-    expect(api.createdDocuments).toEqual([state.app.activeDocument!.id]);
-    // A visible divider marks the new document in the (retained) transcript, so the
-    // user always sees when a document was created/switched.
+    expect(state.app.history[0]!.kind).toBe("create");
+    expect(state.usages).toEqual([]); // spend meter resets on the new document
+    // A visible divider marks the new document in the (retained) transcript.
     expect(state.app.chat.at(-1)).toMatchObject({
       kind: "document",
       event: "created",
@@ -220,25 +217,31 @@ describe("dialog + document effects", () => {
     });
   });
 
-  it("a new document's later edits persist (no 404 -- the create-then-save regression)", async () => {
-    // Start with NO document open, exactly like the reported bug: "create a new
-    // document" then edit it. The edit must persist against the server-created doc.
+  it("applies new_document + insert_text in ONE turn (the same-turn insert that used to fail)", async () => {
+    // Exactly the reported failure: no document open, then a single turn that both
+    // creates a document and writes into it. The insert must land in the new doc,
+    // not error with "no document open".
     const { store, api } = makeStore({ initial: { activeDocument: null } });
 
-    store.getState().dispatch({ type: "new_document", name: "Notes" });
-    await flush();
-    const created = store.getState().app.activeDocument!;
+    store.getState().applyResponse({
+      actions: [
+        { type: "new_document", name: "Poem" },
+        { type: "insert_text", position: "end", text: "Once upon a midnight dreary" },
+      ],
+    });
 
-    // Edit the freshly created document, then drain the persist queue.
-    store.getState().dispatch({ type: "insert_text", position: "end", text: "hello" });
-    await store.getState().flushPersistQueue();
-
-    // The edit persisted (seq 1) against the SAME server document -- no orphaned save.
-    expect(api.persistedVersions).toHaveLength(1);
-    expect(api.persistedVersions[0]!.documentId).toBe(created.id);
-    expect(api.persistedVersions[0]!.seq).toBe(1);
-    // No save-failure error was ever surfaced.
+    const doc = store.getState().app.activeDocument!;
+    expect(doc.name).toBe("Poem");
+    expect(doc.text).toBe("Once upon a midnight dreary"); // same-turn insert landed
     expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(false);
+
+    // Both versions persist in order (v0 create, then v1 insert); the create carries
+    // the document name so the server can auto-create the document row from it.
+    await store.getState().flushPersistQueue();
+    expect(api.persistedVersions.map((v) => v.seq)).toEqual([0, 1]);
+    expect(api.persistedVersions[0]!.kind).toBe("create");
+    expect(api.persistedVersions.every((v) => v.documentId === doc.id)).toBe(true);
+    expect(api.persistedNames[0]).toBe("Poem");
   });
 });
 

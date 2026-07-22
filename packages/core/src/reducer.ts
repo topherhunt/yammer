@@ -337,16 +337,46 @@ export function applyAction(
     }
 
     case "new_document": {
-      return {
-        state,
-        effects: [
-          {
-            type: "create_document",
-            localId: ctx.newId(),
-            ...(action.name !== undefined ? { name: action.name } : {}),
-          },
-        ],
+      // Create the document IN-STATE, synchronously, so a same-turn insert_text
+      // applies to it and the NEXT turn sees it immediately (no async gap that
+      // spawns duplicate documents). Creation is just the first version: the seq-0
+      // "create" version persists through the normal queue, and the server creates
+      // the document row when it receives it (client-authoritative, per plan.md).
+      const documentId = ctx.newId();
+      const version = createVersion({
+        id: ctx.newId(),
+        createdAt: ctx.now(),
+        documentId,
+        parent: null,
+        author: ctx.author,
+        kind: "create",
+        newText: "",
+        summary: "Created document",
+      });
+      const name = action.name ?? "Untitled";
+      const created: AppState = {
+        ...state,
+        activeDocument: {
+          id: documentId,
+          name,
+          text: "",
+          currentVersionId: version.id,
+          currentSeq: version.seq,
+        },
+        history: [version],
+        undoStack: [version.id],
+        undoCursor: 0,
       };
+      // A visible divider in the (retained) transcript so the user always sees the
+      // boundary; the same entry anchors the LLM context to this document.
+      const withDivider = withChat(created, {
+        kind: "document",
+        id: ctx.newId(),
+        at: ctx.now(),
+        event: "created",
+        name,
+      });
+      return { state: withDivider, effects: [{ type: "persist_version", version }] };
     }
 
     case "rename_document": {

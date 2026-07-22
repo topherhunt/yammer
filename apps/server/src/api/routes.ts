@@ -30,6 +30,7 @@ import { handleTurn } from "./turn";
 import { handleResearch } from "./research";
 import { exportDocument } from "./export";
 import { sanitizeFilename, settingsSchema, sortKeySchema } from "./validation";
+import { debugLog } from "../debug";
 
 /** Everything the route handlers need, injected so they stay testable. */
 export interface RouteDeps {
@@ -209,6 +210,7 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
       version?: unknown;
       undoStack?: unknown;
       undoCursor?: unknown;
+      documentName?: unknown;
     } | null;
 
     // Validate the FULL version envelope, not just id/seq/documentId. Casting the
@@ -226,9 +228,35 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
       return c.json({ error: "version.documentId does not match the URL" }, 400);
     }
 
-    // Ownership: 404 for a document that isn't the caller's (or doesn't exist).
+    // Ownership / existence. A missing document is normally a 404 -- EXCEPT when
+    // this is the client's seq-0 "create" version: that IS the creation, so create
+    // the document row from it (client-authoritative creation) and return. Any other
+    // version for a missing doc is a genuine 404.
     const doc = await repos.documents.get(user.id, id);
-    if (!doc) return c.json({ error: "not found" }, 404);
+    if (!doc) {
+      if (version.seq === 0 && version.kind === "create") {
+        // Idempotency: a retry after the doc already exists falls through to the
+        // normal path on the next request; here the doc genuinely does not exist.
+        const name =
+          typeof body?.documentName === "string" ? body.documentName : undefined;
+        try {
+          const created = await repos.documents.createFromClientVersion(user.id, {
+            id,
+            name,
+            version,
+          });
+          return c.json({ document: created, version }, 201);
+        } catch (err) {
+          if (isUniqueViolation(err)) {
+            // The doc was created concurrently (double-submit of the create). Treat
+            // as success -- the version is already stored.
+            return c.json({ version }, 200);
+          }
+          throw err;
+        }
+      }
+      return c.json({ error: "not found" }, 404);
+    }
 
     // Idempotent: a version already stored under this id is a no-op success, so a
     // client retry after a dropped response never errors or double-appends.
@@ -309,6 +337,21 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
   // -- LLM turn loop + research ------------------------------------------
   app.post("/api/turn", (c) => handleTurn(c, deps));
   app.post("/api/research", (c) => handleResearch(c, deps));
+
+  // -- Client debug bridge -----------------------------------------------
+  // Client-side debug events (e.g. the wake-word spotter under VITE_VOSK_DEBUG) POST
+  // here so they land in the same file-based debug log the agent reads -- no console
+  // copy-paste. Authenticated, and only emitted when a client debug flag is on.
+  app.post("/api/debug", async (c) => {
+    const user = requireUser(c);
+    const body = (await c.req.json().catch(() => null)) as {
+      category?: unknown;
+      data?: unknown;
+    } | null;
+    const category = typeof body?.category === "string" ? body.category : "client";
+    debugLog(`client:${category}`, { userId: user.id, data: body?.data });
+    return c.json({ ok: true });
+  });
 
   // -- STT WebSocket endpoint --------------------------------------------
   // The real WS upgrade is handled off the raw Node http server (stt/upgrade.ts),

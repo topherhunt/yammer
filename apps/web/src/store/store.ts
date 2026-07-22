@@ -213,6 +213,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     interface PersistItem {
       version: Version;
       undo: PersistUndo;
+      /** The document's name, captured at enqueue time. The server uses it ONLY to
+       * auto-create the document when this is its seq-0 "create" version; ignored
+       * for every later version. */
+      documentName?: string;
     }
     const persistQueue: PersistItem[] = [];
     let draining = false;
@@ -258,8 +262,12 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       }, backoff);
     }
 
-    function enqueuePersist(version: Version, undo: PersistUndo): void {
-      persistQueue.push({ version, undo });
+    function enqueuePersist(
+      version: Version,
+      undo: PersistUndo,
+      documentName?: string,
+    ): void {
+      persistQueue.push({ version, undo, documentName });
       kickDrain();
     }
 
@@ -278,7 +286,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     ): Promise<"ok" | "conflict" | "failed"> {
       for (let attempt = 0; attempt < MAX_PERSIST_TRIES; attempt++) {
         try {
-          await deps.api.persistVersion(item.version, item.undo);
+          await deps.api.persistVersion(item.version, item.undo, item.documentName);
           return "ok";
         } catch (err) {
           if (httpStatus(err) === 409) return "conflict";
@@ -363,38 +371,6 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       if (!get().app.settings.sfxEnabled) return;
       if (deps.sfx) deps.sfx.play(sound);
       else playSfx(sound);
-    }
-
-    async function handleCreateDocument(name?: string): Promise<void> {
-      // Creation is the one server-authoritative mint: the server assigns the
-      // canonical id + ownership and commits the seq-0 create version atomically,
-      // returning the document + history to adopt as the base. Later edits are
-      // client-authoritative versions persisted through the queue.
-      //
-      // (The previous path minted a LOCAL version 0 and enqueued it to a document
-      // the server had never created -> a permanent 404 that the persist queue
-      // retried forever, spamming the chat. See the third-browser-test backlog.)
-      const payload = await deps.api.createDocument(name);
-      set((s) => ({
-        app: {
-          ...s.app,
-          activeDocument: payload.document,
-          history: payload.history,
-          undoStack: payload.history.map((v) => v.id),
-          undoCursor: payload.history.length - 1,
-          openDialog: null,
-        },
-        usages: [],
-      }));
-      // A visible boundary in the transcript: the chat is retained across documents,
-      // so mark which document the following messages belong to.
-      pushEntry({
-        kind: "document",
-        id: newId(),
-        at: now(),
-        event: "created",
-        name: payload.document.name,
-      });
     }
 
     async function handleLoadDocument(e: {
@@ -496,16 +472,17 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         switch (effect.type) {
           case "persist_version": {
             // Persist the resulting version AND the current undo timeline (N3),
-            // read after the reducer's state was committed above.
-            const { undoStack, undoCursor } = get().app;
-            enqueuePersist(effect.version, { undoStack, undoCursor });
-            break;
-          }
-          case "create_document":
-            runGuarded("Creating the document", () =>
-              handleCreateDocument(effect.name),
+            // read after the reducer's state was committed above. The active doc's
+            // name rides along so the server can auto-create the document from its
+            // seq-0 "create" version (ignored for every later version).
+            const { undoStack, undoCursor, activeDocument } = get().app;
+            enqueuePersist(
+              effect.version,
+              { undoStack, undoCursor },
+              activeDocument?.name,
             );
             break;
+          }
           case "load_document":
             runGuarded("Loading the document", () => handleLoadDocument(effect));
             break;
@@ -563,10 +540,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     }
 
     function applyResponse(response: LlmResponse, usage?: Usage): void {
+      const prevDocId = get().app.activeDocument?.id;
       const result = applyTurn(get().app, response, ctxFor("ai"));
+      // The spend meter is per-document: switching or creating a document (id
+      // change) resets it. This turn's usage still counts toward the doc it ended on.
+      const docChanged = result.state.activeDocument?.id !== prevDocId;
       set((s) => ({
         app: result.state,
-        usages: usage ? [...s.usages, usage] : s.usages,
+        usages: docChanged ? (usage ? [usage] : []) : usage ? [...s.usages, usage] : s.usages,
         lastError: result.error ?? null,
       }));
       runEffects(result.effects);
@@ -780,8 +761,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       },
 
       dispatch(action, author = "user") {
+        const prevDocId = get().app.activeDocument?.id;
         const result = applyAction(get().app, action, ctxFor(author));
-        set({ app: result.state, lastError: result.error ?? null });
+        const docChanged = result.state.activeDocument?.id !== prevDocId;
+        set((s) => ({
+          app: result.state,
+          lastError: result.error ?? null,
+          ...(docChanged ? { usages: [] } : {}),
+        }));
         runEffects(result.effects);
       },
 

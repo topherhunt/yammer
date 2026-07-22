@@ -65,11 +65,6 @@ export interface ApiClient {
    * result (unvalidated actions) out. The store validates with parseLlmResponse. */
   turn(req: TurnRequest): Promise<LlmResult>;
 
-  /** POST /api/documents -- create a new document (and its seq-0 create version)
-   * server-side, authoritatively, returning the document + its history to adopt.
-   * Creation is the one server-authoritative mint (canonical id + ownership); every
-   * later edit is a client-authoritative version appended via persistVersion. */
-  createDocument(name?: string): Promise<DocumentPayload>;
   listDocuments(sort: SortKey): Promise<DocumentMeta[]>;
   getDocument(
     documentId?: string,
@@ -78,8 +73,14 @@ export interface ApiClient {
   ): Promise<DocumentPayload>;
   renameDocument(documentId: string, name: string): Promise<void>;
   /** Append a version to the doc's history. `undo` carries the client's undo
-   * timeline (N3) so the server persists it alongside the snapshot. */
-  persistVersion(version: Version, undo?: PersistUndo): Promise<void>;
+   * timeline (N3) so the server persists it alongside the snapshot. `documentName`
+   * is sent so the server can auto-create the document when this is its seq-0
+   * "create" version (client-authoritative creation); ignored otherwise. */
+  persistVersion(
+    version: Version,
+    undo?: PersistUndo,
+    documentName?: string,
+  ): Promise<void>;
   persistSettings(settings: Settings): Promise<void>;
 
   /** Runs the server research pipeline; returns only the digested findings note

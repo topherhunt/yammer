@@ -164,23 +164,56 @@ describe("createSttBridge -- start / ready / transcripts", () => {
     // 48000 bytes of PCM16 @ 24kHz mono = 1.0 second of audio.
     h.bridge.onClientMessage(audio(48_000), true);
 
-    h.up.emitMessage(
-      JSON.stringify({
-        type: "conversation.item.input_audio_transcription.delta",
-        delta: "hel",
-      }),
-    );
+    // Deltas arrive as incremental fragments; the bridge accumulates them so the
+    // client sees the full running sentence, not just the latest token.
+    const delta = (t: string) =>
+      h.up.emitMessage(
+        JSON.stringify({
+          type: "conversation.item.input_audio_transcription.delta",
+          delta: t,
+        }),
+      );
+    delta("hel");
+    delta("lo");
+    delta(" there");
     h.up.emitMessage(
       JSON.stringify({
         type: "conversation.item.input_audio_transcription.completed",
-        transcript: "hello",
+        transcript: "hello there",
       }),
     );
 
     expect(h.client.received).toEqual([
       { type: "ready" },
       { type: "interim", text: "hel" },
-      { type: "final", text: "hello", seconds: 1 },
+      { type: "interim", text: "hello" },
+      { type: "interim", text: "hello there" },
+      { type: "final", text: "hello there", seconds: 1 },
+    ]);
+  });
+
+  it("resets the accumulated interim after a final, so the next utterance starts fresh", () => {
+    const h = harness();
+    h.bridge.onClientMessage(startFrame(24_000), false);
+    h.up.emitOpen();
+    const delta = (t: string) =>
+      h.up.emitMessage(
+        JSON.stringify({ type: "x.transcription.delta", delta: t }),
+      );
+    const done = (t: string) =>
+      h.up.emitMessage(
+        JSON.stringify({ type: "x.transcription.completed", transcript: t }),
+      );
+
+    delta("one");
+    done("one");
+    delta("two"); // must NOT be "onetwo"
+    done("two");
+
+    const interims = h.client.received.filter((m) => m.type === "interim");
+    expect(interims).toEqual([
+      { type: "interim", text: "one" },
+      { type: "interim", text: "two" },
     ]);
   });
 });

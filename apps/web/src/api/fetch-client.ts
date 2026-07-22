@@ -76,17 +76,6 @@ export class FetchApiClient implements ApiClient {
     return this.requestJson<LlmResult>("/api/turn", this.jsonInit("POST", body));
   }
 
-  async createDocument(name?: string): Promise<DocumentPayload> {
-    const { document, history } = await this.requestJson<{
-      document: ActiveDocument;
-      history: Version[];
-    }>(
-      "/api/documents",
-      this.jsonInit("POST", name !== undefined ? { name } : {}),
-    );
-    return { document, history };
-  }
-
   async listDocuments(sort: SortKey): Promise<DocumentMeta[]> {
     const { documents } = await this.requestJson<{ documents: DocumentMeta[] }>(
       `/api/documents?sort=${encodeURIComponent(sort)}`,
@@ -135,12 +124,17 @@ export class FetchApiClient implements ApiClient {
     );
   }
 
-  async persistVersion(version: Version, undo?: PersistUndo): Promise<void> {
+  async persistVersion(
+    version: Version,
+    undo?: PersistUndo,
+    documentName?: string,
+  ): Promise<void> {
     const body: Record<string, unknown> = { version };
     if (undo) {
       body.undoStack = undo.undoStack;
       body.undoCursor = undo.undoCursor;
     }
+    if (documentName !== undefined) body.documentName = documentName;
     await this.requestJson(
       `/api/documents/${version.documentId}/versions`,
       this.jsonInit("POST", body),

@@ -427,7 +427,7 @@ describe("POST /api/documents/:id/versions (client-authoritative persistence)", 
     ).toEqual([0, 1]);
   });
 
-  it("a version save to a never-created document is a clean 404 (creation must happen first)", async () => {
+  it("a version save to a never-created document is a clean 404 (a non-create version needs the doc)", async () => {
     const { repos } = createTestDb();
     const user = await seedUser(repos);
     const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
@@ -439,6 +439,50 @@ describe("POST /api/documents/:id/versions (client-authoritative persistence)", 
       body: JSON.stringify({ version }),
     });
     expect(res.status).toBe(404);
+  });
+
+  it("auto-creates the document from the client's seq-0 create version (client-authoritative creation)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    // The client minted the doc id + seq-0 create version in its reducer and now
+    // persists it; the document row does not exist yet. The route creates it.
+    const createV = editVersion({
+      documentId: "client-doc-1",
+      seq: 0,
+      parentVersionId: null,
+      kind: "create",
+      fullText: "",
+      summary: "Created document",
+    });
+    const res = await app.request("/api/documents/client-doc-1/versions", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: createV, documentName: "Poem" }),
+    });
+    expect(res.status).toBe(201);
+
+    // The document now exists under the CLIENT's id + name...
+    const doc = await repos.documents.get(user.id, "client-doc-1");
+    expect(doc).toMatchObject({ id: "client-doc-1", name: "Poem", currentSeq: 0 });
+
+    // ...and a following seq-1 edit saves against it (no 404).
+    const editV = editVersion({
+      documentId: "client-doc-1",
+      seq: 1,
+      parentVersionId: createV.id,
+      fullText: "written",
+    });
+    const saved = await app.request("/api/documents/client-doc-1/versions", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version: editV }),
+    });
+    expect(saved.status).toBe(201);
+    expect(
+      (await repos.versions.listForDocument(user.id, "client-doc-1")).map((v) => v.seq),
+    ).toEqual([0, 1]);
   });
 
   it("persists the client's undo timeline when supplied", async () => {

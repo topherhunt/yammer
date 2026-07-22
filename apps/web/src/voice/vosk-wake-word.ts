@@ -1,5 +1,6 @@
 import { createModel, type KaldiRecognizer, type Model } from "vosk-browser";
 import type { WakeWordDetector } from "./interfaces";
+import { reportClientDebug } from "../util/debug";
 
 // Open-source, keyless, on-device wake-word spotter using Vosk (vosk-browser,
 // Apache-2.0) running a small English model in a WASM worker. It listens ONLY
@@ -123,13 +124,23 @@ export class VoskWakeWord implements WakeWordDetector {
     }
     this.stream = stream;
 
-    const audio = new AudioContext();
+    // Vosk's small model is 16 kHz; capture at 16 kHz so we feed it its native rate
+    // rather than relying on resampling of 48 kHz hardware audio (a likely cause of
+    // the spotter never matching).
+    const audio = new AudioContext({ sampleRate: 16000 });
     this.audio = audio;
     const recognizer = new model.KaldiRecognizer(audio.sampleRate, GRAMMAR);
     this.recognizer = recognizer;
 
-    // Only final results -- partials are unstable and cause premature wakes on a
-    // fleeting "yam". The final result carries per-word confidence for the gate.
+    // Fire on BOTH partial and final results. Partials appear WHILE you speak;
+    // finals only after a clear pause (which may not reliably fire), so keying on
+    // the partial makes the wake far more responsive. The specific "wake up" trigger
+    // keeps false wakes down even without the final's confidence gate.
+    recognizer.on("partialresult", (message) => {
+      if (message.event === "partialresult") {
+        this.considerPartial(message.result.partial);
+      }
+    });
     recognizer.on("result", (message) => {
       if (message.event === "result") this.consider(message.result);
     });
@@ -152,6 +163,19 @@ export class VoskWakeWord implements WakeWordDetector {
     processor.connect(audio.destination);
   }
 
+  /** A partial (mid-speech) hypothesis: no per-word confidence, so match on the
+   * trigger text alone. This is the primary, most-responsive wake path. */
+  private considerPartial(partial: string): void {
+    if (WAKE_DEBUG && partial) {
+      // eslint-disable-next-line no-console
+      console.log(`[wake-word] partial "${partial}"`);
+      reportClientDebug("wake-word", { kind: "partial", partial });
+    }
+    if (this.running && partial.toLowerCase().includes(WAKE_TRIGGER)) {
+      this.fire();
+    }
+  }
+
   private consider(result: VoskResult): void {
     if (WAKE_DEBUG && result.text) {
       const mean = meanConfidence(result).toFixed(2);
@@ -160,12 +184,22 @@ export class VoskWakeWord implements WakeWordDetector {
         `[wake-word] heard "${result.text}" mean-conf=${mean} (bar ${this.minConfidence})`,
         result.result,
       );
+      reportClientDebug("wake-word", {
+        kind: "final",
+        text: result.text,
+        meanConf: meanConfidence(result),
+        words: result.result,
+      });
     }
     if (this.running && isConfidentWake(result, this.minConfidence)) {
-      // Fire once per activation; stop() before re-arming on the next pause.
-      this.stop();
-      for (const cb of this.cbs) cb();
+      this.fire();
     }
+  }
+
+  /** Fire once per activation; stop() before re-arming on the next pause. */
+  private fire(): void {
+    this.stop();
+    for (const cb of this.cbs) cb();
   }
 
   private loadModel(): Promise<Model> {

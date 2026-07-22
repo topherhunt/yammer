@@ -140,6 +140,10 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
   const pending: Uint8Array[] = [];
   let totalBytes = 0;
   let bytesSinceFinal = 0;
+  // The upstream streams interim transcripts as incremental DELTAS (" Hey", ",",
+  // " can", ...). Accumulate them so the client receives the full running sentence,
+  // not just the latest fragment. Reset when the utterance finalizes.
+  let interimText = "";
   // A commit that arrived before the upstream was OPEN: the buffered audio is
   // flushed on open, then this fires the deferred commit so no utterance is lost.
   let pendingCommit = false;
@@ -231,11 +235,14 @@ export function createSttBridge(config: SttBridgeConfig): SttBridge {
     if (closed) return;
     const event = parseUpstreamEvent(data);
     if (event.kind === "interim") {
-      send({ type: "interim", text: event.text });
+      // Accumulate the delta into the running sentence before relaying it.
+      interimText += event.text;
+      send({ type: "interim", text: interimText.trimStart() });
     } else if (event.kind === "final") {
       const seconds =
         sampleRate > 0 ? bytesSinceFinal / (sampleRate * BYTES_PER_SAMPLE) : 0;
       bytesSinceFinal = 0;
+      interimText = ""; // utterance done -- next utterance's deltas start fresh
       send({ type: "final", text: event.text, seconds });
     } else if (event.kind === "error") {
       send({ type: "error", message: event.message });

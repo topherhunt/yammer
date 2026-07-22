@@ -73,6 +73,21 @@ Reference cost (per 1M tokens, input/output): gpt-5.6-luna $1/$6, terra $2.50/$1
 - Three test tiers: fast unit (default), mocked E2E (Playwright, STT+LLM mocked), and an **opt-in live-API tier** that hits real models -- always cost-accounted, hard-capped, and never in normal `pnpm test`/CI.
 - Run tests + typecheck after changes before calling work done.
 
+## Debugging (agent-readable logs)
+
+Set env flags and reproduce; output goes to the terminal AND `yammer-debug.log` (repo root, gitignored) so you can read it directly instead of asking the user to paste:
+- `YAMMER_TURN_DEBUG=1` -- each turn's transcript, LLM latency (ms), raw model response.
+- `YAMMER_STT_DEBUG=1` -- the STT session config + every event OpenAI streams back (deltas, completions, rate errors).
+- `VITE_VOSK_DEBUG=1` (web) -- wake-word hypotheses; these POST to `/api/debug` so they land in the same file. Add other client debug via `reportClientDebug()` (`apps/web/src/util/debug.ts`).
+Central helper: `apps/server/src/debug.ts` (`debugLog(category, data)`).
+
+## Lessons learned (don't re-introduce)
+
+- **Turns are strictly serial and fully incorporated before the next.** Never let a subsequent LLM/turn read state a prior turn hasn't committed. Corollary: a state-changing op the next turn depends on (creating/switching a document) must be applied SYNCHRONOUSLY in the reducer, not deferred to an async effect -- doing the latter spawned duplicate documents.
+- **Creation is client-authoritative, like every edit.** `new_document` builds the doc + its seq-0 `create` version in-state; that version persists through the normal queue and the server auto-creates the row from it (`documentName` rides along). Do NOT add a separate server-authoritative "mint a document" round-trip.
+- **STT interim arrives as incremental deltas** -- accumulate them (server bridge) before showing; don't render each fragment as the whole transcript.
+- **VAD end-of-speech is `redemptionMs` in `vad.ts`** (`VITE_VAD_REDEMPTION_MS`). Too low cuts people off mid-sentence; keep it generous (currently 2000ms).
+
 ## Collaboration
 
 - Surface assumptions; if a request is ambiguous, name the readings rather than silently picking one.

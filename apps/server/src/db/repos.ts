@@ -95,6 +95,15 @@ export interface DocumentsRepo {
   get(userId: string, documentId: string): Promise<ActiveDocument | null>;
   findByName(userId: string, name: string): Promise<DocumentMeta | null>;
   create(userId: string, input: { name?: string }): Promise<ActiveDocument>;
+  /** Create a document from the CLIENT's seq-0 "create" version (client-authoritative
+   * creation: the client minted the id + version in its reducer). The document id
+   * and the version are taken as given; the name is disambiguated on collision so a
+   * bare "new document" never fails the unique index. Doc row + version commit
+   * atomically. */
+  createFromClientVersion(
+    userId: string,
+    input: { id: string; name?: string; version: Version },
+  ): Promise<ActiveDocument>;
   rename(
     userId: string,
     documentId: string,
@@ -377,6 +386,57 @@ export function createRepos(db: Database): Repos {
         text: "",
         currentVersionId: initial.id,
         currentSeq: initial.seq,
+      };
+    },
+
+    async createFromClientVersion(userId, input) {
+      const now = new Date().toISOString();
+      const { id, version } = input;
+      // Disambiguate the requested name (or "Untitled") so a bare new document never
+      // trips the unique index -- "Untitled", "Untitled 2", ...
+      let name = input.name && input.name.trim() ? input.name : "Untitled";
+      if ((await idsWithName(userId, name)).length > 0) {
+        const base = name;
+        let n = 1;
+        do {
+          n += 1;
+          name = `${base} ${n}`;
+        } while ((await idsWithName(userId, name)).length > 0);
+      }
+      // Doc row + its seq-0 version commit together (see create() for why); here both
+      // the id and the version are the client's, taken as given.
+      await db.transaction(async (tx) => {
+        await tx.insert(documents).values({
+          id,
+          userId,
+          name,
+          createdAt: now,
+          updatedAt: now,
+          currentVersionId: version.id,
+          undoStack: [version.id],
+          undoCursor: 0,
+        });
+        await tx.insert(versions).values({
+          id: version.id,
+          userId,
+          documentId: id,
+          seq: version.seq,
+          parentVersionId: version.parentVersionId,
+          author: version.author,
+          kind: version.kind,
+          summary: version.summary,
+          fullText: version.fullText,
+          diff: version.diff,
+          createdAt: version.createdAt,
+          restoredFromVersionId: version.restoredFromVersionId ?? null,
+        });
+      });
+      return {
+        id,
+        name,
+        text: version.fullText,
+        currentVersionId: version.id,
+        currentSeq: version.seq,
       };
     },
 

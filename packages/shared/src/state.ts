@@ -190,8 +190,9 @@ export type SfxSound = "send" | "mute" | "unmute" | "error";
  * dispatch any resulting follow-up actions.
  */
 export type Effect =
+  // A new document creates in-state (reducer) and persists as its seq-0 "create"
+  // version through this same effect -- there is no separate create_document effect.
   | { type: "persist_version"; version: Version }
-  | { type: "create_document"; localId: string; name?: string }
   | {
       type: "load_document";
       documentId?: string;
