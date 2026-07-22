@@ -1,5 +1,5 @@
-
 - [x] Create a passable icon
 - [x] Set up Google Cloud SSO
 - [ ] Rename folder to yammer
-- [ ] 
+- [ ] Support streaming LLM responses so they're applied faster, reducing perceived wait time
+- [ ] Also double check that we are caching properly, so old chat history only accumulates at cached prices, not at full quadratic price.

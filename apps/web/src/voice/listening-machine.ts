@@ -89,12 +89,15 @@ export const initialListeningState: ListeningState = {
 export function indicatorFor(state: ListeningState): {
   vad: boolean;
   finalizing: boolean;
+  suspended: boolean;
 } {
-  const capturing = state.mode === "listening";
+  const capturing = state.mode === "listening" && !state.suspended;
   return {
     vad: capturing && state.phase === "speaking",
     finalizing:
       capturing && (state.phase === "finalizing" || state.phase === "grace"),
+    // Backgrounded while in listening mode: capture is paused but will auto-resume.
+    suspended: state.mode === "listening" && state.suspended,
   };
 }
 

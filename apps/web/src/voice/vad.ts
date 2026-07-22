@@ -35,7 +35,7 @@ export class SileroVadDetector implements VadDetector {
         // clauses. This is THE knob for "it keeps cutting me off" -- raise it further
         // (1200-1500) if pauses still trip it. (Total wait before send is this plus
         // the optimistic-send grace window.) Overridable via VITE_VAD_REDEMPTION_MS.
-        redemptionMs: Number(import.meta.env.VITE_VAD_REDEMPTION_MS) || 2000,
+        redemptionMs: Number(import.meta.env.VITE_VAD_REDEMPTION_MS) || 1500,
         onSpeechStart: () => {
           for (const cb of this.startCbs) cb();
         },

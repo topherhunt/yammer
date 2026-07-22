@@ -238,13 +238,21 @@ describe("background / foreground (Page Visibility)", () => {
 
 describe("indicator projection + inert events", () => {
   it("maps phases to pulse (vad) and radial (finalizing)", () => {
-    expect(indicatorFor(listening)).toEqual({ vad: false, finalizing: false });
+    expect(indicatorFor(listening)).toEqual({ vad: false, finalizing: false, suspended: false });
     const speaking = reduceListening(listening, { type: "SPEECH_START" }).state;
-    expect(indicatorFor(speaking)).toEqual({ vad: true, finalizing: false });
+    expect(indicatorFor(speaking)).toEqual({ vad: true, finalizing: false, suspended: false });
     const finalizing = reduceListening(speaking, { type: "SPEECH_END" }).state;
-    expect(indicatorFor(finalizing)).toEqual({ vad: false, finalizing: true });
+    expect(indicatorFor(finalizing)).toEqual({ vad: false, finalizing: true, suspended: false });
     const paused = reduceListening(listening, { type: "PAUSE" }).state;
-    expect(indicatorFor(paused)).toEqual({ vad: false, finalizing: false });
+    expect(indicatorFor(paused)).toEqual({ vad: false, finalizing: false, suspended: false });
+  });
+
+  it("reports suspended (backgrounded) so the indicator can gray out", () => {
+    const hidden = reduceListening(listening, { type: "HIDDEN" }).state;
+    // Mode stays listening (auto-resumes), but capture is suspended -> not live.
+    expect(indicatorFor(hidden)).toEqual({ vad: false, finalizing: false, suspended: true });
+    const visible = reduceListening(hidden, { type: "VISIBLE" }).state;
+    expect(indicatorFor(visible)).toEqual({ vad: false, finalizing: false, suspended: false });
   });
 
   it("INTERIM and stray GRACE_ELAPSED do nothing", () => {

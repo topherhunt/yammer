@@ -8,6 +8,7 @@ import type { Context } from "hono";
 import type { SearchResult, Usage } from "@yammer/shared";
 import type { RouteDeps } from "./routes";
 import { requireUser } from "../auth/session";
+import { debugLog } from "../debug";
 import { buildResearchPrompt, renderResearchInput } from "./prompt";
 import {
   MAX_RESEARCH_QUERIES,
@@ -44,8 +45,11 @@ export async function handleResearch(
   // it never received.
   const seen = new Set<string>();
   const collected: SearchResult[] = [];
-  try {
-    for (const query of queries) {
+  const searchErrors: string[] = [];
+  // Tolerant per query: one query's search failing (e.g. a transient Tavily 503)
+  // must not sink the whole request when other queries succeed.
+  for (const query of queries) {
+    try {
       const results = await deps.search.search(query);
       for (const r of results) {
         if (!seen.has(r.url)) {
@@ -53,12 +57,18 @@ export async function handleResearch(
           collected.push(r);
         }
       }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      debugLog("research", { stage: "search", query, error: message });
+      searchErrors.push(message);
     }
-  } catch (err) {
-    return c.json(
-      { error: `web search failed: ${err instanceof Error ? err.message : String(err)}` },
-      502,
-    );
+  }
+  // Only a hard failure if EVERY search failed and nothing came back.
+  if (collected.length === 0) {
+    if (searchErrors.length > 0) {
+      return c.json({ error: `web search failed: ${searchErrors[0]}` }, 502);
+    }
+    return c.json({ error: "no search results found" }, 404);
   }
 
   // Pick the top pages (heuristic top-K; the digest step below is the load-bearing
@@ -70,15 +80,26 @@ export async function handleResearch(
 
   // Fetch full content (inline from Tavily/Exa when present, else a fetch call). A
   // fetch rejection is likewise a 502, not a swallowed/opaque failure.
+  // Tolerant per page: a page that blocks scrapers, times out, or returns no
+  // content (e.g. researchgate) is SKIPPED, not fatal -- we digest whatever we got.
   const pages: { title: string; url: string; content: string }[] = [];
-  try {
-    for (const r of picked) {
+  for (const r of picked) {
+    try {
       const content = r.content ?? (await deps.search.fetchContent(r.url));
-      pages.push({ title: r.title, url: r.url, content });
+      if (content && content.trim()) {
+        pages.push({ title: r.title, url: r.url, content });
+      }
+    } catch (err) {
+      debugLog("research", {
+        stage: "fetch",
+        url: r.url,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-  } catch (err) {
+  }
+  if (pages.length === 0) {
     return c.json(
-      { error: `fetching page content failed: ${err instanceof Error ? err.message : String(err)}` },
+      { error: "no page content could be fetched from the search results" },
       502,
     );
   }
@@ -96,10 +117,9 @@ export async function handleResearch(
       model,
     });
   } catch (err) {
-    return c.json(
-      { error: `research digest failed: ${err instanceof Error ? err.message : String(err)}` },
-      502,
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    debugLog("research", { stage: "digest", error: message });
+    return c.json({ error: `research digest failed: ${message}` }, 502);
   }
 
   // An empty/whitespace digest means the model returned nothing usable: surface it

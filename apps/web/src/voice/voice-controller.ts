@@ -33,6 +33,9 @@ export interface SttSource {
 export interface VoiceIndicator {
   vad: boolean;
   finalizing: boolean;
+  /** Capture is suspended because the tab/window is backgrounded (mode is still
+   * "listening" and will auto-resume on focus). Drives the grayed-out indicator. */
+  suspended: boolean;
 }
 
 export interface Timers {

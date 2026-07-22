@@ -50,10 +50,10 @@ describe("VAD -> pulse indicator", () => {
     const { controller, stt, indicators } = makeController();
     controller.start();
     stt.emitVad(true);
-    expect(indicators.at(-1)).toEqual({ vad: true, finalizing: false });
+    expect(indicators.at(-1)).toMatchObject({ vad: true, finalizing: false });
     stt.emitVad(false);
     // Silence -> finalizing (awaiting the STT final), so the radial shows.
-    expect(indicators.at(-1)).toEqual({ vad: false, finalizing: true });
+    expect(indicators.at(-1)).toMatchObject({ vad: false, finalizing: true });
   });
 });
 
@@ -66,7 +66,7 @@ describe("finalize + grace -> radial, then optimistic send", () => {
     stt.emitFinal("hello there", 2);
 
     // In the grace window: radial on, nothing sent yet.
-    expect(indicators.at(-1)).toEqual({ vad: false, finalizing: true });
+    expect(indicators.at(-1)).toMatchObject({ vad: false, finalizing: true });
     expect(submits).toEqual([]);
 
     // Before the window elapses -- still nothing.
@@ -77,7 +77,7 @@ describe("finalize + grace -> radial, then optimistic send", () => {
     vi.advanceTimersByTime(1);
     expect(submits).toEqual([{ text: "hello there", seconds: 2 }]);
     expect(sfx.played).toEqual(["send"]);
-    expect(indicators.at(-1)).toEqual({ vad: false, finalizing: false });
+    expect(indicators.at(-1)).toMatchObject({ vad: false, finalizing: false });
   });
 
   it("resumed speech within the grace window cancels the pending send", () => {
@@ -172,7 +172,7 @@ describe("finalize timeout (dropped final must not hang)", () => {
     stt.emitVad(false); // -> finalizing, radial on, finalize timer armed
 
     expect(controller.snapshot.phase).toBe("finalizing");
-    expect(indicators.at(-1)).toEqual({ vad: false, finalizing: true });
+    expect(indicators.at(-1)).toMatchObject({ vad: false, finalizing: true });
 
     // The STT final never arrives (e.g. a dropped socket). Just before the
     // timeout: still finalizing, no error yet.
@@ -185,7 +185,7 @@ describe("finalize timeout (dropped final must not hang)", () => {
     vi.advanceTimersByTime(1);
     expect(controller.snapshot.phase).toBe("silent");
     expect(controller.snapshot.mode).toBe("listening");
-    expect(indicators.at(-1)).toEqual({ vad: false, finalizing: false });
+    expect(indicators.at(-1)).toMatchObject({ vad: false, finalizing: false });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/did not finish/i);
   });

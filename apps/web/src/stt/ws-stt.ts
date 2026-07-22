@@ -57,6 +57,14 @@ export class WsSttClient implements SttProvider {
   /** Samples streamed upstream since the last commit. OpenAI rejects a commit of
    * under ~100 ms of audio, so end-of-speech only commits once enough was sent. */
   private sentSamplesSinceCommit = 0;
+  /** The latest ACCUMULATED interim transcript (the bridge sends running text, not
+   * fragments). By end-of-speech every delta has arrived, so this IS the full
+   * utterance -- we submit it immediately rather than waiting ~500ms for the
+   * upstream's `completed`, which is the biggest removable slice of send latency. */
+  private latestInterim = "";
+  /** Drop the one real `final` that follows an interim-based submit (it would
+   * otherwise submit the same utterance twice). */
+  private suppressNextFinal = false;
   /** Frames captured before `ready`; flushed once the upstream is OPEN so the
    * leading edge of an utterance is not lost (and early frames don't tear the
    * connection down -- see plan.md voice security backlog). */
@@ -91,10 +99,10 @@ export class WsSttClient implements SttProvider {
     opts.vad.onSpeechEnd(() => {
       this.speaking = false;
       this.emitVad(false);
-      // End-of-speech: tell the server to commit the buffered utterance so the
-      // upstream transcribes it and emits a final. Without this the upstream (with
-      // server-VAD disabled) never endpoints and no final is ever produced.
-      this.commitUtterance();
+      // End-of-speech: commit the utterance (so the upstream closes + bills it) AND
+      // submit its transcript from the interim we already have, without waiting for
+      // the upstream's slower `completed` event.
+      this.finalizeUtterance();
     });
   }
 
@@ -108,6 +116,8 @@ export class WsSttClient implements SttProvider {
     this.ready = false;
     this.speaking = false;
     this.sentSamplesSinceCommit = 0;
+    this.latestInterim = "";
+    this.suppressNextFinal = false;
     this.prebuffer = [];
     this.reconnectAttempts = 0;
     this.reconnectScheduled = false;
@@ -243,18 +253,29 @@ export class WsSttClient implements SttProvider {
     this.sentSamplesSinceCommit += frame.length;
   }
 
-  /** On end-of-speech, commit the buffered utterance so the upstream transcribes
-   * it. Guarded: a commit of under ~120 ms of audio is rejected by OpenAI
-   * ("buffer too small"), so a fleeting VAD blip that streamed almost nothing is
-   * dropped rather than committed. */
-  private commitUtterance(): void {
+  /** On end-of-speech: commit the utterance to the upstream (so it closes + bills
+   * the segment) and IMMEDIATELY submit its transcript from the accumulated interim,
+   * rather than waiting for the upstream's `completed`. Guarded: a segment under
+   * ~120 ms of audio is a fleeting VAD blip -- neither committed nor submitted. */
+  private finalizeUtterance(): void {
     const socket = this.socket;
     if (!socket || socket.readyState !== WS_OPEN || !this.ready) return;
     const minSamples = this.opts.mic.sampleRate * 0.12;
     if (this.sentSamplesSinceCommit < minSamples) return;
+
+    // Audio-seconds for the spend meter, measured client-side (the interim carries
+    // no duration). Read before the commit resets the counter.
+    const seconds = this.sentSamplesSinceCommit / this.opts.mic.sampleRate;
     this.sentSamplesSinceCommit = 0;
-    const commit: SttClientMessage = { type: "commit" };
-    socket.send(JSON.stringify(commit));
+    socket.send(JSON.stringify({ type: "commit" } satisfies SttClientMessage));
+
+    const text = this.latestInterim.trim();
+    this.latestInterim = "";
+    if (!text) return; // no transcript yet -- fall back to the upstream's final
+    // Submit now; drop the redundant `completed` that will arrive ~500ms later.
+    this.suppressNextFinal = true;
+    for (const cb of this.finalCbs) cb(text);
+    for (const cb of this.finalDetailedCbs) cb(text, seconds);
   }
 
   private onServerMessage(data: unknown): void {
@@ -275,9 +296,20 @@ export class WsSttClient implements SttProvider {
         this.flushPrebuffer();
         break;
       case "interim":
+        // The bridge sends the running (accumulated) transcript; keep the latest so
+        // end-of-speech can submit it without awaiting `completed`.
+        this.latestInterim = msg.text;
         for (const cb of this.interimCbs) cb(msg.text);
         break;
       case "final":
+        if (this.suppressNextFinal) {
+          // Already submitted from the interim -- drop the redundant authoritative
+          // final (the upstream still emits it for its own bookkeeping).
+          this.suppressNextFinal = false;
+          this.latestInterim = "";
+          break;
+        }
+        this.latestInterim = "";
         for (const cb of this.finalCbs) cb(msg.text);
         for (const cb of this.finalDetailedCbs) cb(msg.text, msg.seconds);
         break;

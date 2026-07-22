@@ -917,11 +917,9 @@ describe("POST /api/research", () => {
     expect(llm.requests).toHaveLength(0);
   });
 
-  it("maps a fetchContent rejection (page with no inline content) to a 502", async () => {
+  it("502s only when EVERY page fails to fetch (all-fail is fatal)", async () => {
     const { repos } = createTestDb();
     const user = await seedUser(repos);
-    // Result has NO inline content, so the handler falls back to fetchContent -- which
-    // here rejects. That must surface as a 502, not an opaque 500.
     const results: SearchResult[] = [{ title: "T", url: "https://ex.com/a", snippet: "s" }];
     const boomFetch: SearchProvider = {
       search: async () => results,
@@ -938,8 +936,45 @@ describe("POST /api/research", () => {
       body: JSON.stringify({ queries: ["q"] }),
     });
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: string }).error).toMatch(/fetching page content failed/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/no page content/);
     expect(llm.requests).toHaveLength(0);
+  });
+
+  it("SKIPS a flaky page and digests the ones that succeed (one bad page isn't fatal)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    // Two results: the first blocks scrapers (rejects), the second returns content.
+    // Research must proceed with the good one, not 502 the whole request.
+    const results: SearchResult[] = [
+      { title: "Blocked", url: "https://researchgate.net/x", snippet: "s" },
+      { title: "Good", url: "https://ex.com/ok", snippet: "s" },
+    ];
+    const search: SearchProvider = {
+      search: async () => results,
+      fetchContent: async (url) => {
+        if (url.includes("researchgate")) throw new Error("no content");
+        return "Penguins dive deep and forage in coordinated groups.";
+      },
+    };
+    const llm = new FakeLlm([
+      {
+        chatMessage: "Penguins forage together at depth.",
+        actions: [],
+        usage: { sttSeconds: 0, inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 },
+        raw: {},
+      },
+    ]);
+    const app = buildApp({ repos, llm, search });
+
+    const res = await app.request("/api/research", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ queries: ["penguin foraging"] }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { note: string }).note).toContain("forage");
+    // The digest ran on the surviving page only.
+    expect(llm.requests).toHaveLength(1);
   });
 });
 

@@ -66,6 +66,9 @@ export interface AppStore {
    * composer until the utterance is submitted as a message. Empty when not
    * mid-utterance. */
   interimTranscript: string;
+  /** True while capture is suspended because the tab/window is backgrounded (mode is
+   * still "listening", auto-resumes on focus). Drives the grayed-out mic + label. */
+  micBackgrounded: boolean;
   /** The id of the LAST user message included in the LLM turn currently in flight,
    * so the view can show a "working" spinner beside it. Messages after it are queued
    * (spoken while the turn ran) and not yet seen by the model. Null when idle. */
@@ -99,7 +102,11 @@ export interface AppStore {
    * voice-error channel the voice pipeline routes its failures through. */
   pushVoiceError: (message: string) => void;
   /** Push the voice pipeline's derived indicator signals into the view. */
-  setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
+  setVoiceIndicator: (indicator: {
+    vad: boolean;
+    finalizing: boolean;
+    suspended?: boolean;
+  }) => void;
   /** Push the current smoothed mic input level (0..1) into the view. */
   setMicLevel: (level: number) => void;
   /** Push the live partial transcript into the composer (gray preview text). */
@@ -721,6 +728,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       vadActive: false,
       micLevel: 0,
       interimTranscript: "",
+      micBackgrounded: false,
       workingAnchorId: null,
       sttPhase: "idle",
       listeningPhase: "idle",
@@ -782,8 +790,12 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         surfaceError(message);
       },
 
-      setVoiceIndicator({ vad, finalizing }) {
-        set({ vadActive: vad, listeningPhase: finalizing ? "finalizing" : "idle" });
+      setVoiceIndicator({ vad, finalizing, suspended }) {
+        set({
+          vadActive: vad,
+          listeningPhase: finalizing ? "finalizing" : "idle",
+          micBackgrounded: suspended ?? false,
+        });
       },
 
       setMicLevel(level) {

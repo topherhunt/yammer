@@ -124,6 +124,32 @@ describe("audio gating", () => {
     expect(h.socket.sentControl.at(-1)).toEqual({ type: "commit" });
   });
 
+  it("submits the accumulated interim on end-of-speech, then drops the upstream's redundant final", () => {
+    const h = makeClient(); // sampleRate 16000
+    const finals: string[] = [];
+    const detailed: Array<{ text: string; seconds: number }> = [];
+    h.client.onFinal((t) => finals.push(t));
+    h.client.onFinalDetailed((text, seconds) => detailed.push({ text, seconds }));
+    h.client.start();
+    h.socket.open();
+    h.socket.server({ type: "ready" });
+
+    // Stream a real utterance's audio + its (accumulated) interim transcript.
+    h.vad.emitSpeechStart();
+    h.mic.emitFrame(new Int16Array(2000)); // >= 1920-sample floor
+    h.socket.server({ type: "interim", text: "hello there" });
+
+    // End-of-speech submits the interim IMMEDIATELY (no waiting on `completed`),
+    // with client-measured audio-seconds for the spend meter.
+    h.vad.emitSpeechEnd();
+    expect(finals).toEqual(["hello there"]);
+    expect(detailed[0]!.seconds).toBeCloseTo(2000 / 16000);
+
+    // The upstream's real `completed` lands ~500ms later and is dropped (no dup).
+    h.socket.server({ type: "final", text: "hello there.", seconds: 1.2 });
+    expect(finals).toEqual(["hello there"]);
+  });
+
   it("surfaces VAD speech edges through onVad", () => {
     const h = makeClient();
     const seen: boolean[] = [];

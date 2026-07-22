@@ -23,12 +23,15 @@ export function ChatComposer() {
   const micLevel = useAppStore((s) => s.micLevel);
   const listeningPhase = useAppStore((s) => s.listeningPhase);
   const interim = useAppStore((s) => s.interimTranscript);
+  const backgrounded = useAppStore((s) => s.micBackgrounded);
 
   const [draft, setDraft] = useState("");
   const [focused, setFocused] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  const isListening = listening === "listening";
+  // Backgrounded: the tab/window lost focus, so capture is suspended (it auto-resumes
+  // on return). Show it as inactive (gray + a clear label), NOT as live "Listening".
+  const isListening = listening === "listening" && !backgrounded;
   const busy = phase === "sending" || listeningPhase === "finalizing";
   const pulsing = isListening && vad;
 
@@ -122,7 +125,11 @@ export function ChatComposer() {
         aria-live="polite"
         className="qa-listening-state mt-1 text-xs text-gray-500 dark:text-gray-400"
       >
-        {busy ? "Working…" : LABELS[listening]}
+        {busy
+          ? "Working…"
+          : backgrounded
+            ? "Paused -- window in background (returns when you come back)"
+            : LABELS[listening]}
       </div>
     </div>
   );
