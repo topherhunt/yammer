@@ -195,16 +195,43 @@ describe("dialog + document effects", () => {
     expect(app.chat.at(-1)?.kind).toBe("restore");
   });
 
-  it("creates a fresh document and resets the spend meter", () => {
-    const { store } = makeStore();
+  it("creates a fresh document server-side and resets the spend meter", async () => {
+    const { store, api } = makeStore();
     store.getState().usages.push({ sttSeconds: 9, inputTokens: 9, cachedInputTokens: 0, outputTokens: 9 });
     store.getState().dispatch({ type: "new_document", name: "Fresh" });
+    // Creation is an async server round-trip now (not a local mint), so let it settle.
+    await flush();
 
     const state = store.getState();
     expect(state.app.activeDocument?.name).toBe("Fresh");
     expect(state.app.activeDocument?.text).toBe("");
     expect(state.app.history).toHaveLength(1);
     expect(state.usages).toEqual([]);
+    // The document was created THROUGH the server (POST /api/documents), so the
+    // adopted id is real and later version saves won't 404. This is the exact
+    // regression from the third browser test.
+    expect(api.createdDocuments).toEqual([state.app.activeDocument!.id]);
+  });
+
+  it("a new document's later edits persist (no 404 -- the create-then-save regression)", async () => {
+    // Start with NO document open, exactly like the reported bug: "create a new
+    // document" then edit it. The edit must persist against the server-created doc.
+    const { store, api } = makeStore({ initial: { activeDocument: null } });
+
+    store.getState().dispatch({ type: "new_document", name: "Notes" });
+    await flush();
+    const created = store.getState().app.activeDocument!;
+
+    // Edit the freshly created document, then drain the persist queue.
+    store.getState().dispatch({ type: "insert_text", position: "end", text: "hello" });
+    await store.getState().flushPersistQueue();
+
+    // The edit persisted (seq 1) against the SAME server document -- no orphaned save.
+    expect(api.persistedVersions).toHaveLength(1);
+    expect(api.persistedVersions[0]!.documentId).toBe(created.id);
+    expect(api.persistedVersions[0]!.seq).toBe(1);
+    // No save-failure error was ever surfaced.
+    expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(false);
   });
 });
 
@@ -373,17 +400,38 @@ describe("scoped 409 conflict (other documents' edits survive)", () => {
       },
     });
 
-    // Queue two persists in one tick: an edit on d1 (will 409) and a brand-new
-    // document (different documentId). Both are enqueued before the drain yields.
+    // Queue two persists in one synchronous tick, before the drain's first `await`
+    // yields: an edit on d1 (will 409), then -- switching to a second document --
+    // an edit on d2. Both sit in the queue together, which is what makes the 409
+    // reconcile's per-document scoping meaningful.
+    const d2CreateV = createVersion({
+      id: "d2v0",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      documentId: "d2",
+      parent: null,
+      author: "user",
+      kind: "create",
+      newText: "",
+      summary: "Created document",
+    });
     store.getState().dispatch({ type: "edit_text", edits: [{ find: "cat", replace: "dog" }] });
-    store.getState().dispatch({ type: "new_document", name: "Second" });
+    store.setState((s) => ({
+      app: {
+        ...s.app,
+        activeDocument: { id: "d2", name: "Second", text: "", currentVersionId: "d2v0", currentSeq: 0 },
+        history: [d2CreateV],
+        undoStack: ["d2v0"],
+        undoCursor: 0,
+      },
+    }));
+    store.getState().dispatch({ type: "insert_text", position: "end", text: "hi" });
     await store.getState().flushPersistQueue();
 
-    // The d1 edit conflicted and was reconciled away; the OTHER document's create
-    // version was NOT dropped -- it persisted.
+    // The d1 edit conflicted and was reconciled away; the OTHER document's edit was
+    // NOT dropped -- it persisted.
     const persistedDocs = api.persistedVersions.map((v) => v.documentId);
     expect(persistedDocs).not.toContain("d1");
-    expect(persistedDocs.some((id) => id !== "d1")).toBe(true);
+    expect(persistedDocs).toContain("d2");
     // The 409 was surfaced to the user.
     expect(store.getState().app.chat.some((e) => e.kind === "error")).toBe(true);
   });

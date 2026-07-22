@@ -1,4 +1,5 @@
 import type {
+  ActiveDocument,
   DocumentMeta,
   LlmResult,
   Settings,
@@ -7,6 +8,7 @@ import type {
   Version,
 } from "@yammer/shared";
 import { zeroUsage } from "@yammer/shared";
+import { createVersion } from "@yammer/core";
 import type {
   ApiClient,
   DocumentPayload,
@@ -78,6 +80,38 @@ export class MockApiClient implements ApiClient {
     this.turnRequests.push(req);
     if (this.turnResponder) return this.turnResponder(req);
     return this.turnQueue.shift() ?? emptyResult;
+  }
+
+  /** Ids minted by createDocument, so a test can assert a new doc was created. */
+  readonly createdDocuments: string[] = [];
+  private createdDocCount = 0;
+
+  async createDocument(name?: string): Promise<DocumentPayload> {
+    this.createdDocCount += 1;
+    const documentId = `mock-doc-${this.createdDocCount}`;
+    const at = "2026-01-01T00:00:00.000Z";
+    const version = createVersion({
+      id: `${documentId}-v0`,
+      createdAt: at,
+      documentId,
+      parent: null,
+      author: "user",
+      kind: "create",
+      newText: "",
+      summary: "Created document",
+    });
+    const document: ActiveDocument = {
+      id: documentId,
+      name: name ?? `Untitled ${this.createdDocCount}`,
+      text: "",
+      currentVersionId: version.id,
+      currentSeq: 0,
+    };
+    const payload: DocumentPayload = { document, history: [version] };
+    this.payloads[documentId] = payload;
+    this.documents.push({ id: documentId, name: document.name, createdAt: at, updatedAt: at });
+    this.createdDocuments.push(documentId);
+    return payload;
   }
 
   async listDocuments(sort: SortKey): Promise<DocumentMeta[]> {

@@ -101,7 +101,24 @@ export function ChatSidebar() {
 
   useEffect(() => {
     const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // Only auto-follow when the user is already near the bottom -- never yank them
+    // away from earlier messages they scrolled up to read.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (!nearBottom) return;
+    if (typeof requestAnimationFrame !== "function") {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    // A new entry grows from height 0 to full over ~300ms, so one scroll at insert
+    // time lands short. Keep pinning to the bottom for the animation's duration so
+    // the whole message ends up visible.
+    const start = performance.now();
+    let raf = requestAnimationFrame(function pin() {
+      el.scrollTop = el.scrollHeight;
+      if (performance.now() - start < 360) raf = requestAnimationFrame(pin);
+    });
+    return () => cancelAnimationFrame(raf);
   }, [chat.length]);
 
   return (

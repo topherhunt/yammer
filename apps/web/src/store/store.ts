@@ -2,7 +2,6 @@ import { createStore } from "zustand/vanilla";
 import type { StoreApi } from "zustand/vanilla";
 import type {
   Action,
-  ActiveDocument,
   AppState,
   Author,
   Effect,
@@ -21,7 +20,6 @@ import {
   applyAction,
   applyTurn,
   assembleContext,
-  createVersion,
   parseLlmResponse,
 } from "@yammer/core";
 import type { Ctx } from "@yammer/core";
@@ -212,6 +210,14 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     let drainPromise: Promise<void> = Promise.resolve();
     let reDrainHandle: ReturnType<typeof setTimeout> | null = null;
     const reDrainDelayMs = deps.reDrainDelayMs ?? 5000;
+    // Consecutive re-drain failures, for exponential backoff, and a latch so a
+    // stuck save surfaces ONE error, not a fresh chat entry on every retry. Both
+    // reset the moment any version persists (connectivity is back).
+    let reDrainAttempts = 0;
+    let persistErrorSurfaced = false;
+    /** Cap on the backoff so we keep retrying forever but at most once a minute --
+     * never dropping the edit, never spamming. */
+    const RE_DRAIN_MAX_MS = 60_000;
 
     /** Start draining if there is queued work and no drain is in flight. Safe to
      * call from anywhere (enqueue, the re-drain timer, the `online` event). */
@@ -229,10 +235,18 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
      * the `online` event resumes immediately (below). */
     function scheduleReDrain(): void {
       if (reDrainHandle !== null || persistQueue.length === 0) return;
+      // Exponential backoff, capped: 5s, 10s, 20s, 40s, then 60s forever. Keeps
+      // retrying indefinitely (the edit is never dropped) without hammering a down
+      // server or flooding the log.
+      const backoff = Math.min(
+        RE_DRAIN_MAX_MS,
+        reDrainDelayMs * 2 ** reDrainAttempts,
+      );
+      reDrainAttempts += 1;
       reDrainHandle = setTimeout(() => {
         reDrainHandle = null;
         kickDrain();
-      }, reDrainDelayMs);
+      }, backoff);
     }
 
     function enqueuePersist(version: Version, undo: PersistUndo): void {
@@ -271,6 +285,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         const outcome = await attemptPersist(item);
         if (outcome === "ok") {
           persistQueue.shift();
+          // A successful write means we're connected again: clear the backoff and
+          // re-arm the one-shot error latch so a LATER outage surfaces once more.
+          reDrainAttempts = 0;
+          persistErrorSurfaced = false;
           continue;
         }
         if (outcome === "conflict") {
@@ -288,12 +306,16 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           continue; // keep draining any surviving other-document edits
         }
         // Transient failure survived every retry. PAUSE at the head (never drop
-        // the edit) and surface it, then schedule a delayed re-drain (and the
-        // `online` event resumes immediately) so the edit is retried even without
-        // another user action. Ordering and the user's work are preserved.
-        surfaceError(
-          `Could not save your last edit to the server after ${MAX_PERSIST_TRIES} attempts. Your work is kept and will retry -- please check your connection.`,
-        );
+        // the edit) and schedule a backed-off re-drain (and the `online` event
+        // resumes immediately) so the edit is retried even without another user
+        // action. Ordering and the user's work are preserved. Surface the problem
+        // ONCE per outage -- the latch stops a fresh chat error on every retry.
+        if (!persistErrorSurfaced) {
+          persistErrorSurfaced = true;
+          surfaceError(
+            `Could not save your last edit to the server (attempted ${MAX_PERSIST_TRIES} times). Your work is kept and will keep retrying in the background -- please check your connection.`,
+          );
+        }
         scheduleReDrain();
         return;
       }
@@ -334,37 +356,27 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       else playSfx(sound);
     }
 
-    function handleCreateDocument(localId: string, name?: string): void {
-      const version = createVersion({
-        id: newId(),
-        createdAt: now(),
-        documentId: localId,
-        parent: null,
-        author: "user",
-        kind: "create",
-        newText: "",
-        summary: "Created document",
-      });
-      const document: ActiveDocument = {
-        id: localId,
-        name: name ?? "Untitled",
-        text: "",
-        currentVersionId: version.id,
-        currentSeq: 0,
-      };
+    async function handleCreateDocument(name?: string): Promise<void> {
+      // Creation is the one server-authoritative mint: the server assigns the
+      // canonical id + ownership and commits the seq-0 create version atomically,
+      // returning the document + history to adopt as the base. Later edits are
+      // client-authoritative versions persisted through the queue.
+      //
+      // (The previous path minted a LOCAL version 0 and enqueued it to a document
+      // the server had never created -> a permanent 404 that the persist queue
+      // retried forever, spamming the chat. See the third-browser-test backlog.)
+      const payload = await deps.api.createDocument(name);
       set((s) => ({
         app: {
           ...s.app,
-          activeDocument: document,
-          history: [version],
-          undoStack: [version.id],
-          undoCursor: 0,
+          activeDocument: payload.document,
+          history: payload.history,
+          undoStack: payload.history.map((v) => v.id),
+          undoCursor: payload.history.length - 1,
           openDialog: null,
         },
         usages: [],
       }));
-      const { undoStack, undoCursor } = get().app;
-      enqueuePersist(version, { undoStack, undoCursor });
     }
 
     async function handleLoadDocument(e: {
@@ -464,7 +476,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             break;
           }
           case "create_document":
-            handleCreateDocument(effect.localId, effect.name);
+            runGuarded("Creating the document", () =>
+              handleCreateDocument(effect.name),
+            );
             break;
           case "load_document":
             runGuarded("Loading the document", () => handleLoadDocument(effect));

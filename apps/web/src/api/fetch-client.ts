@@ -76,6 +76,17 @@ export class FetchApiClient implements ApiClient {
     return this.requestJson<LlmResult>("/api/turn", this.jsonInit("POST", body));
   }
 
+  async createDocument(name?: string): Promise<DocumentPayload> {
+    const { document, history } = await this.requestJson<{
+      document: ActiveDocument;
+      history: Version[];
+    }>(
+      "/api/documents",
+      this.jsonInit("POST", name !== undefined ? { name } : {}),
+    );
+    return { document, history };
+  }
+
   async listDocuments(sort: SortKey): Promise<DocumentMeta[]> {
     const { documents } = await this.requestJson<{ documents: DocumentMeta[] }>(
       `/api/documents?sort=${encodeURIComponent(sort)}`,

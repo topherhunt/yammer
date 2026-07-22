@@ -65,6 +65,11 @@ export interface ApiClient {
    * result (unvalidated actions) out. The store validates with parseLlmResponse. */
   turn(req: TurnRequest): Promise<LlmResult>;
 
+  /** POST /api/documents -- create a new document (and its seq-0 create version)
+   * server-side, authoritatively, returning the document + its history to adopt.
+   * Creation is the one server-authoritative mint (canonical id + ownership); every
+   * later edit is a client-authoritative version appended via persistVersion. */
+  createDocument(name?: string): Promise<DocumentPayload>;
   listDocuments(sort: SortKey): Promise<DocumentMeta[]>;
   getDocument(
     documentId?: string,

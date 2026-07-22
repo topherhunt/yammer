@@ -385,6 +385,62 @@ describe("POST /api/documents/:id/versions (client-authoritative persistence)", 
     expect((await repos.versions.listForDocument(user.id, doc.id)).map((v) => v.seq)).toEqual([0, 1]);
   });
 
+  it("create-then-save round-trip: POST /api/documents returns the create version, then an edit saves against it", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    // Create through the HTTP API exactly as the client now does.
+    const created = await app.request("/api/documents", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ name: "Fresh" }),
+    });
+    expect(created.status).toBe(201);
+    const { document, history } = (await created.json()) as {
+      document: { id: string; currentVersionId: string; currentSeq: number };
+      history: { seq: number; kind: string }[];
+    };
+    // The response carries the seq-0 create version so the client adopts the base
+    // without a second round-trip (and without minting its own version 0).
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ seq: 0, kind: "create" });
+    expect(document.currentSeq).toBe(0);
+
+    // A subsequent edit (seq 1) saves against the now-existing document -- the exact
+    // path that used to 404 forever because creation never happened server-side.
+    const version = editVersion({
+      documentId: document.id,
+      seq: 1,
+      parentVersionId: document.currentVersionId,
+      fullText: "typed words",
+      summary: "typed",
+    });
+    const saved = await app.request(`/api/documents/${document.id}/versions`, {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version }),
+    });
+    expect(saved.status).toBe(201);
+    expect(
+      (await repos.versions.listForDocument(user.id, document.id)).map((v) => v.seq),
+    ).toEqual([0, 1]);
+  });
+
+  it("a version save to a never-created document is a clean 404 (creation must happen first)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const app = buildApp({ repos, llm: new FakeLlm(), search: new FakeSearch() });
+
+    const version = editVersion({ documentId: "ghost-doc", seq: 1, fullText: "x" });
+    const res = await app.request("/api/documents/ghost-doc/versions", {
+      method: "POST",
+      headers: jsonHeaders(user.id),
+      body: JSON.stringify({ version }),
+    });
+    expect(res.status).toBe(404);
+  });
+
   it("persists the client's undo timeline when supplied", async () => {
     const { db, repos } = createTestDb();
     const user = await seedUser(repos);

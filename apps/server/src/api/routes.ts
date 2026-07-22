@@ -149,7 +149,12 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     const body = (await c.req.json().catch(() => ({}))) as { name?: unknown };
     const name = typeof body.name === "string" && body.name ? body.name : undefined;
     try {
-      return c.json({ document: await repos.documents.create(user.id, { name }) }, 201);
+      // Create the document + its seq-0 version, then return BOTH document and
+      // history so the client can adopt the authoritative base directly (no extra
+      // round-trip, and no client-minted version 0 racing a not-yet-created doc).
+      const document = await repos.documents.create(user.id, { name });
+      const history = await repos.versions.listForDocument(user.id, document.id);
+      return c.json({ document, history }, 201);
     } catch (err) {
       // Case-insensitive name collision -> 409 (never silently create a duplicate).
       if (err instanceof DuplicateNameError || isUniqueViolation(err)) {
