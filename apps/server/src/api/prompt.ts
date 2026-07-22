@@ -46,7 +46,10 @@ export function renderUserMessage(
       context.document.numberedText,
     );
   } else {
-    parts.push("# No document is currently open.");
+    parts.push(
+      "# No document is currently open.",
+      "If the user wants to write, dictate, or edit any text, FIRST emit a `new_document` action (give it a short name if they named a topic, otherwise omit the name), THEN apply their text in the same turn. Never emit edit_text/insert_text with no document open -- that fails. If they are only chatting or asking a question, just answer.",
+    );
   }
 
   if (context.visible) {

@@ -53,6 +53,9 @@ export interface VoiceControllerDeps {
   submit: (text: string, seconds: number) => void;
   /** Push derived UI signals into the view (store.setVoiceIndicator). */
   reflect: (indicator: VoiceIndicator) => void;
+  /** Live partial transcript for the composer (store.setInterim): the words heard
+   * so far this segment, shown as gray text until the utterance is submitted. */
+  onInterim?: (text: string) => void;
   /** A wake-word hit requests a resume; the edge maps this to a set_listening
    * action so app.listening + the unmute SFX flow through the reducer, keeping
    * the store authoritative rather than the controller flipping state directly. */
@@ -86,7 +89,10 @@ export class VoiceController {
     deps.stt.onVad((speaking) =>
       this.send({ type: speaking ? "SPEECH_START" : "SPEECH_END" }),
     );
-    deps.stt.onInterim((text) => this.send({ type: "INTERIM", text }));
+    deps.stt.onInterim((text) => {
+      this.deps.onInterim?.(text);
+      this.send({ type: "INTERIM", text });
+    });
     deps.stt.onFinalDetailed((text, seconds) =>
       this.send({ type: "FINAL", text, seconds }),
     );

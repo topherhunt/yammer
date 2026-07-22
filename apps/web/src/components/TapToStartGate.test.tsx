@@ -3,7 +3,7 @@ import { act, fireEvent, render } from "@testing-library/react";
 import type { AppState } from "@yammer/shared";
 import { App } from "../App";
 import { makeTestStore } from "../test/render";
-import { ListeningIndicator } from "./ListeningIndicator";
+import { ChatComposer } from "./ChatComposer";
 import { StoreProvider } from "../store/context";
 
 // The tap-to-start gate + the indicator's reflection of machine state.
@@ -40,14 +40,14 @@ describe("tap-to-start gate", () => {
   });
 });
 
-describe("ListeningIndicator reflects machine signals", () => {
+describe("composer mic reflects machine signals", () => {
   it("pulses while listening + VAD active and shows the radial while finalizing", () => {
     const { store } = makeTestStore({
       initial: { ...withDoc, listening: "listening" },
     });
     const { container } = render(
       <StoreProvider store={store}>
-        <ListeningIndicator />
+        <ChatComposer />
       </StoreProvider>,
     );
 

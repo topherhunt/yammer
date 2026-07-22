@@ -211,6 +211,13 @@ describe("dialog + document effects", () => {
     // adopted id is real and later version saves won't 404. This is the exact
     // regression from the third browser test.
     expect(api.createdDocuments).toEqual([state.app.activeDocument!.id]);
+    // A visible divider marks the new document in the (retained) transcript, so the
+    // user always sees when a document was created/switched.
+    expect(state.app.chat.at(-1)).toMatchObject({
+      kind: "document",
+      event: "created",
+      name: "Fresh",
+    });
   });
 
   it("a new document's later edits persist (no 404 -- the create-then-save regression)", async () => {

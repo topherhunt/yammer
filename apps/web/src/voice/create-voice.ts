@@ -73,6 +73,8 @@ export function createVoice(
       void store.getState().submitTranscript(text, seconds);
     },
     reflect: (indicator) => store.getState().setVoiceIndicator(indicator),
+    // Live partial transcript -> the composer's gray preview text.
+    onInterim: (text) => store.getState().setInterim(text),
     // A wake-word hit routes through a set_listening action so the reducer stays
     // authoritative (updates app.listening + plays the unmute SFX).
     onResumeRequested: () =>

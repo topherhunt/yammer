@@ -29,11 +29,13 @@ export class SileroVadDetector implements VadDetector {
         // pre-bundle the ort WASM). Versions must match the installed packages.
         baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
         onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/",
-        // Fire end-of-speech after a shorter silence hangover than the default
-        // (~800ms) so the turn kicks off sooner -- a real chunk of the "finished
-        // speaking -> response" latency. The optimistic-send grace window recovers
-        // the occasional too-eager stop, so this is safe to tighten.
-        redemptionMs: 500,
+        // Silence (ms) after speech before we declare the sentence over. Too low and
+        // it cuts off mid-sentence on a natural pause and ships a half-sentence; too
+        // high and the reply feels laggy. 1000ms leaves room to draw breath between
+        // clauses. This is THE knob for "it keeps cutting me off" -- raise it further
+        // (1200-1500) if pauses still trip it. (Total wait before send is this plus
+        // the optimistic-send grace window.) Overridable via VITE_VAD_REDEMPTION_MS.
+        redemptionMs: Number(import.meta.env.VITE_VAD_REDEMPTION_MS) || 1000,
         onSpeechStart: () => {
           for (const cb of this.startCbs) cb();
         },

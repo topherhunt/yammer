@@ -14,6 +14,7 @@ import type { RouteDeps } from "./routes";
 import { requireUser } from "../auth/session";
 import { buildSystemPrompt, renderUserMessage } from "./prompt";
 import { turnRequestSchema } from "./validation";
+import { debugLog } from "../debug";
 
 function combineUsage(sttSeconds: number, llmUsage: Usage): Usage {
   return {
@@ -66,10 +67,11 @@ export async function handleTurn(
     });
   } catch (err) {
     if (debug) {
-      console.error(
-        `[turn] LLM error after ${Date.now() - startedAt}ms for "${transcript}":`,
-        err,
-      );
+      debugLog("turn", {
+        transcript,
+        ms: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     return c.json(
       { error: `LLM request failed: ${err instanceof Error ? err.message : String(err)}` },
@@ -77,12 +79,13 @@ export async function handleTurn(
     );
   }
   if (debug) {
-    console.log(
-      `[turn] "${transcript}" -> LLM ${Date.now() - startedAt}ms, ` +
-        `${llmResult.actions?.length ?? 0} action(s), ` +
-        `chatMessage=${JSON.stringify(llmResult.chatMessage ?? null)}`,
-    );
-    console.log("[turn] raw:", JSON.stringify(llmResult.raw));
+    debugLog("turn", {
+      transcript,
+      ms: Date.now() - startedAt,
+      actions: llmResult.actions,
+      chatMessage: llmResult.chatMessage ?? null,
+      raw: llmResult.raw,
+    });
   }
 
   const usage = combineUsage(sttSeconds, llmResult.usage);

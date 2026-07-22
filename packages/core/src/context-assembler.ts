@@ -26,6 +26,11 @@ function chatText(entry: ChatEntry): { role: string; text: string } {
       return { role: entry.author, text: `[restore] ${entry.summary}` };
     case "research":
       return { role: "assistant", text: `[research] ${entry.summary}` };
+    case "document":
+      return {
+        role: "system",
+        text: `[document ${entry.event}] The session ${entry.event} the document "${entry.name}". Messages below this line concern it.`,
+      };
     case "error":
       return { role: "system", text: `[error] ${entry.message}` };
   }

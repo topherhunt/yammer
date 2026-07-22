@@ -8,6 +8,7 @@
 import { WebSocket } from "ws";
 import type { SttLatency } from "@yammer/shared";
 import type { SttUpstream } from "./bridge";
+import { debugLog } from "../debug";
 
 export interface OpenAiUpstreamOptions {
   apiKey: string;
@@ -30,7 +31,7 @@ export function openOpenAiUpstream(opts: OpenAiUpstreamOptions): SttUpstream {
   // rate rejections). Off by default so a normal run stays quiet.
   const debug = !!process.env.YAMMER_STT_DEBUG;
   const trace = (dir: string, payload: unknown) => {
-    if (debug) console.log(`[stt upstream ${dir}]`, payload);
+    if (debug) debugLog("stt", { dir, payload });
   };
   // GA Realtime API: /v1/realtime, NO "OpenAI-Beta" header (that is the removed
   // beta path), and a session.update with session.type "transcription".

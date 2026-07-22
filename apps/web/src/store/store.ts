@@ -61,6 +61,10 @@ export interface AppStore {
    * amplitude-reactive size/glow of the mic button so the user can see it hearing
    * them. 0 when not listening. */
   micLevel: number;
+  /** Live partial transcript ("what you're saying now"), shown as gray text in the
+   * composer until the utterance is submitted as a message. Empty when not
+   * mid-utterance. */
+  interimTranscript: string;
   sttPhase: SttPhase;
   /** Machine-derived: "finalizing" while an utterance is finalizing or in the
    * pre-send grace window (drives the radial). Distinct from `sttPhase`, which
@@ -93,6 +97,11 @@ export interface AppStore {
   setVoiceIndicator: (indicator: { vad: boolean; finalizing: boolean }) => void;
   /** Push the current smoothed mic input level (0..1) into the view. */
   setMicLevel: (level: number) => void;
+  /** Push the live partial transcript into the composer (gray preview text). */
+  setInterim: (text: string) => void;
+  /** Submit typed composer text as a turn (the keyboard path; STT uses the same
+   * submitTranscript under the hood). Clears any interim preview. */
+  submitComposerText: (text: string) => void;
   /** Apply one action from a UI control (default author "user"). */
   dispatch: (action: Action, author?: Author) => void;
   /** Update one or more settings from the Settings dialog: merge into
@@ -377,6 +386,15 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         },
         usages: [],
       }));
+      // A visible boundary in the transcript: the chat is retained across documents,
+      // so mark which document the following messages belong to.
+      pushEntry({
+        kind: "document",
+        id: newId(),
+        at: now(),
+        event: "created",
+        name: payload.document.name,
+      });
     }
 
     async function handleLoadDocument(e: {
@@ -396,6 +414,13 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         },
         usages: [],
       }));
+      pushEntry({
+        kind: "document",
+        id: newId(),
+        at: now(),
+        event: "opened",
+        name: payload.document.name,
+      });
     }
 
     async function handleLoadDocuments(sort: AppState["settings"]["loadDocSort"]): Promise<void> {
@@ -459,6 +484,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         set({
           vadActive: false,
           micLevel: 0,
+          interimTranscript: "",
           sttPhase: "idle",
           listeningPhase: "idle",
         });
@@ -599,6 +625,8 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             { kind: "user_message", id: newId(), at: now(), text },
           ],
         },
+        // The utterance is now a message bubble; clear the live preview.
+        interimTranscript: "",
         sttPhase: "sending",
       }));
 
@@ -671,6 +699,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       usages: [],
       vadActive: false,
       micLevel: 0,
+      interimTranscript: "",
       sttPhase: "idle",
       listeningPhase: "idle",
       micStarted: false,
@@ -739,6 +768,17 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         set({ micLevel: level });
       },
 
+      setInterim(text) {
+        set({ interimTranscript: text });
+      },
+
+      submitComposerText(text) {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        set({ interimTranscript: "" });
+        void get().submitTranscript(trimmed);
+      },
+
       dispatch(action, author = "user") {
         const result = applyAction(get().app, action, ctxFor(author));
         set({ app: result.state, lastError: result.error ?? null });
@@ -789,6 +829,12 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
   });
   deps.stt.onVad((speaking) => {
     store.setState({ vadActive: speaking });
+  });
+  // Live partials -> the composer's gray preview. In the real pipeline the
+  // VoiceController forwards these (deps.stt here is an inert MockStt); this wiring
+  // serves the direct/test path where deps.stt is the live provider.
+  deps.stt.onInterim((text) => {
+    store.setState({ interimTranscript: text });
   });
 
   return store;

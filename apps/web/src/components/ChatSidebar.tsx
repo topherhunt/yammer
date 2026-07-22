@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ChatEntry } from "@yammer/shared";
 import { cx } from "../util/cx";
 import { useAppStore } from "../store/context";
-import { ListeningIndicator } from "./ListeningIndicator";
+import { ChatComposer } from "./ChatComposer";
 import { SpendMeter } from "./SpendMeter";
 
 // The chat sidebar: a scrolling message list (dictated text, AI messages,
@@ -62,6 +62,21 @@ function ChatMessageView({ entry }: { entry: ChatEntry }) {
         <div className="qa-chat-entry qa-chat-research rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 dark:border-gray-700 dark:text-gray-200">
           <span className="font-medium">Research: </span>
           {entry.summary}
+        </div>
+      );
+    case "document":
+      // A centered divider marking a document boundary in the session transcript.
+      return (
+        <div
+          className="qa-chat-entry qa-chat-document my-1 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"
+          data-event={entry.event}
+        >
+          <span className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
+          <span className="whitespace-nowrap">
+            {entry.event === "created" ? "Created" : "Opened"}{" "}
+            <span className="font-medium">{entry.name}</span>
+          </span>
+          <span className="h-px flex-1 bg-gray-200 dark:bg-gray-700" />
         </div>
       );
     case "error":
@@ -153,7 +168,7 @@ export function ChatSidebar() {
           ))
         )}
       </ul>
-      <ListeningIndicator />
+      <ChatComposer />
       <SpendMeter />
     </div>
   );

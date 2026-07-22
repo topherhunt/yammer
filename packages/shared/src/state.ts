@@ -116,6 +116,16 @@ export type ChatEntry =
       restoredFromVersionId: string;
     }
   | { kind: "research"; id: string; at: string; summary: string }
+  // A document boundary in the transcript: the session created or switched into a
+  // document. Rendered as a visible divider so the user (and the LLM's context)
+  // always know which document the surrounding messages belong to.
+  | {
+      kind: "document";
+      id: string;
+      at: string;
+      event: "created" | "opened";
+      name: string;
+    }
   | { kind: "error"; id: string; at: string; message: string };
 
 export interface ScrollState {
