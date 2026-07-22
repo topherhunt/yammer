@@ -134,6 +134,38 @@ describe("submitTranscript turn loop", () => {
     expect(store.getState().workingAnchorId).toBeNull(); // cleared when done
   });
 
+  it("re-invokes the model after research so it ACTS on the findings (not a dead-end)", async () => {
+    let turnCalls = 0;
+    const { store } = makeStore({
+      api: {
+        researchSummary: "Penguins forage in coordinated groups at depth.",
+        turnResponder: () => {
+          turnCalls += 1;
+          // Turn 1: request research. The auto-continuation (turn 2) uses the note.
+          return turnCalls === 1
+            ? { actions: [{ type: "research", queries: ["penguin foraging"] }], usage, raw: {} }
+            : {
+                chatMessage: "Here's your limerick.",
+                actions: [{ type: "insert_text", position: "end", text: " a limerick" }],
+                usage,
+                raw: {},
+              };
+        },
+      },
+    });
+
+    await store.getState().submitTranscript("research penguins then write a limerick");
+    // The research pipeline + the auto-continuation run beyond the first turn.
+    for (let i = 0; i < 6; i++) await flush();
+
+    // The model was invoked a SECOND time and acted on the findings.
+    expect(turnCalls).toBe(2);
+    const kinds = store.getState().app.chat.map((e) => e.kind);
+    expect(kinds).toContain("research"); // the digested note landed in the chat
+    expect(store.getState().app.activeDocument?.text).toContain("a limerick");
+    expect(store.getState().researching).toBe(false); // spinner flag cleared
+  });
+
   it("retries an invalid LLM response a few times, then surfaces a chat error", async () => {
     let calls = 0;
     const { store } = makeStore({

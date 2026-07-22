@@ -115,6 +115,9 @@ export function ChatSidebar() {
   // The message the model is currently working on (last in the in-flight batch).
   // Messages after it are queued -- spoken while the turn ran, not yet seen.
   const workingAnchorId = useAppStore((s) => s.workingAnchorId);
+  // The research pipeline outlives the turn that launched it; keep a spinner on the
+  // latest entry while it runs so the user knows work is still in flight.
+  const researching = useAppStore((s) => s.researching);
   const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
@@ -156,8 +159,13 @@ export function ChatSidebar() {
             Say something to start writing.
           </li>
         ) : (
-          chat.map((entry) => {
-            const working = entry.id === workingAnchorId;
+          chat.map((entry, i) => {
+            const alignEnd = entry.kind === "user_message";
+            // Spinner while the model works this message, OR while research (which
+            // outlives the turn) runs -- pinned to the latest entry in that case.
+            const working =
+              entry.id === workingAnchorId ||
+              (researching && i === chat.length - 1);
             return (
               <li
                 key={entry.id}
@@ -168,11 +176,15 @@ export function ChatSidebar() {
               >
                 <div className="qa-chat-anim-inner">
                   {working ? (
-                    // Spinner beside the bubble the model is working on right now.
-                    <div className="flex items-end justify-end gap-1.5">
+                    <div
+                      className={cx(
+                        "flex items-end gap-1.5",
+                        alignEnd ? "justify-end" : "justify-start",
+                      )}
+                    >
                       <span
                         role="status"
-                        aria-label="The AI is working on this message"
+                        aria-label="The AI is working"
                         className="qa-working-spinner mb-1 h-3.5 w-3.5 shrink-0"
                       />
                       <div className="min-w-0">

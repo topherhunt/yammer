@@ -408,6 +408,15 @@ These paths are covered by unit tests through their interfaces (fakes/mocks), bu
 - **Real backend features:** research (Tavily), export `.md`/`.docx`, and the diagnostic-log download all work against the live server + Postgres.
 - **Voice-restore:** "restore version 3" / "go back to the first version" resolve and restore; "read the earlier version, then put that paragraph back" works as a two-step.
 
+### Follow-ups from the tenth browser test (turn-502, research follow-through, grace)
+
+- **Turn 502 "missing actions array" -- FIXED (root cause).** The intent-discernment prompt made the model reply CHAT-ONLY (just `{chatMessage}`, no `actions`), and the OpenAI adapter THREW on a missing actions array -> 502 -> "failed after 3 attempts". A missing/!array `actions` is now treated as `[]` (a valid chat-only turn), never a failure. This was breaking ordinary "just replying" turns.
+- **Research was a dead-end -- FIXED (auto-continue).** The model emitted `research`, the note landed in the chat, but nothing re-invoked the model to USE it. Now after the digest, the store runs a ONE-SHOT continuation turn (internal cue, no user bubble, loop-guarded) so the model acts on the findings (writes the limerick). Prompt updated to tell the model research is two-step. Tested.
+- **Research spinner -- ADDED.** `researching` flag keeps a spinner on the latest entry while the pipeline (which outlives the turn) runs; the continuation turn's `workingAnchorId` continues it.
+- **Research result now logged.** `debugLog("research", {stage:"done", note})` -- the digested note was previously only in the sidebar (the gap the user flagged). Now the debug file is complete.
+- **Grace window explained + cut.** redemption (1500ms silence) and `optimisticSendMs` (barge-in cancel window) are DIFFERENT; total was 1500+400. Coalescing makes the grace mostly redundant, so lowered to 200ms. Net send delay ~= 1500 + ~200 = ~1700ms.
+- **Research 502s (prior round) were Tavily flakiness** (503s, extractor timeouts, scraper-blocked pages); the per-item tolerance from the ninth-test round handles them.
+
 ### Follow-ups from the ninth browser test (research resilience, send-latency, backgrounded UI)
 
 - **Research 502 -- diagnosed + fixed.** Log showed the cause: Tavily flakiness (`upstream 503`, `extractor timeout`, "no content" for researchgate which blocks scrapers). Bug on our side: the search/fetch loops threw on the FIRST failure, killing the whole request. Now BOTH are per-item tolerant -- a failed query or un-scrapable page is skipped and logged; only an all-fail is fatal. Tested (one bad page + one good -> 200, digests the good one).

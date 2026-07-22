@@ -220,7 +220,9 @@ export const defaultSettings: Settings = {
   loadDocSort: "updated",
   sfxEnabled: true,
   silenceThresholdMs: 800,
-  optimisticSendMs: 400,
+  // Small barge-in cancel window after end-of-speech. Kept short because coalescing
+  // already folds a resumed utterance into the next turn, so this needn't be large.
+  optimisticSendMs: 200,
   chatCompactThreshold: 24,
 };
 

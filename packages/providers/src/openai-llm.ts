@@ -115,9 +115,11 @@ export function parseOpenAiResponse(response: OpenAiResponseLike): LlmResult {
 
   const envelope = parsed as { chatMessage?: unknown; actions?: unknown };
 
-  if (!Array.isArray(envelope.actions)) {
-    throw new Error('OpenAI response is missing an "actions" array');
-  }
+  // A response with no actions array is a CHAT-ONLY turn (the model chose to just
+  // talk -- exactly what we ask it to do for chit-chat). Treat it as an empty action
+  // list, never a hard failure: throwing here 502s the whole turn, which is how a
+  // perfectly-valid "just replying" response was breaking the conversation.
+  const actions = Array.isArray(envelope.actions) ? envelope.actions : [];
 
   let chatMessage: string | undefined;
   if (envelope.chatMessage !== undefined && envelope.chatMessage !== null) {
@@ -129,7 +131,7 @@ export function parseOpenAiResponse(response: OpenAiResponseLike): LlmResult {
 
   return {
     chatMessage,
-    actions: envelope.actions,
+    actions,
     usage: mapOpenAiUsage(response.usage),
     raw: response,
   };

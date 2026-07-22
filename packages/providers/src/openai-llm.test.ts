@@ -116,10 +116,15 @@ describe("parseOpenAiResponse", () => {
     ).toThrow(/not an object/);
   });
 
-  it("throws when the actions array is missing", () => {
-    expect(() =>
-      parseOpenAiResponse({ output_text: JSON.stringify({ chatMessage: "hi" }), usage }),
-    ).toThrow(/missing an "actions" array/);
+  it("treats a missing actions array as a chat-only turn (empty actions), not a failure", () => {
+    // The model legitimately replies with just a message for chit-chat; throwing here
+    // 502'd the whole turn. A missing actions array becomes [].
+    const result = parseOpenAiResponse({
+      output_text: JSON.stringify({ chatMessage: "hi" }),
+      usage,
+    });
+    expect(result.chatMessage).toBe("hi");
+    expect(result.actions).toEqual([]);
   });
 
   it("throws when chatMessage is present but not a string", () => {

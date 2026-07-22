@@ -128,6 +128,14 @@ export async function handleResearch(
   if (!note) {
     return c.json({ error: "research digest returned an empty note" }, 502);
   }
+  // Log the successful result so the debug file is complete (the digested note is
+  // otherwise only visible in the chat sidebar).
+  debugLog("research", {
+    stage: "done",
+    queries,
+    pages: pages.length,
+    note,
+  });
 
   const usage: Usage = {
     sttSeconds: 0,

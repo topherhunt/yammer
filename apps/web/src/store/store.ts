@@ -41,6 +41,10 @@ export type SttPhase = "idle" | "finalizing" | "sending";
 const MAX_TURN_ATTEMPTS = 3;
 /** Linear backoff base between turn retries (multiplied by the attempt number). */
 const TURN_RETRY_DELAY_MS = 400;
+/** Internal transcript that re-invokes the model after research completes, so it acts
+ * on the findings (which now sit in the conversation) instead of stopping. */
+const RESEARCH_CONTINUE_CUE =
+  "(The web research you requested is complete and its findings are in the conversation above. Now fulfill my ORIGINAL request using those findings -- e.g. write what I asked for. Do not search again.)";
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -69,6 +73,9 @@ export interface AppStore {
   /** True while capture is suspended because the tab/window is backgrounded (mode is
    * still "listening", auto-resumes on focus). Drives the grayed-out mic + label. */
   micBackgrounded: boolean;
+  /** True while the web-research pipeline is running (search -> read -> digest), so
+   * the view can show a spinner -- the work continues after the triggering turn. */
+  researching: boolean;
   /** The id of the LAST user message included in the LLM turn currently in flight,
    * so the view can show a "working" spinner beside it. Messages after it are queued
    * (spoken while the turn ran) and not yet seen by the model. Null when idle. */
@@ -437,10 +444,28 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       // ran; stage the next status before the (single) server round-trip that
       // reads + digests, then land the digested note as a research entry. Its
       // billed usage is folded into the spend meter exactly like a turn's usage.
-      pushEntry({ kind: "thinking", id: newId(), at: now(), status: "Reading results…" });
-      const { note, usage } = await deps.api.research(queries);
-      pushEntry({ kind: "research", id: newId(), at: now(), summary: note });
-      set((s) => ({ usages: [...s.usages, usage] }));
+      // `researching` keeps a spinner up because this work outlives the turn.
+      set({ researching: true });
+      try {
+        pushEntry({ kind: "thinking", id: newId(), at: now(), status: "Reading results…" });
+        const { note, usage } = await deps.api.research(queries);
+        pushEntry({ kind: "research", id: newId(), at: now(), summary: note });
+        set((s) => ({ usages: [...s.usages, usage] }));
+      } finally {
+        set({ researching: false });
+      }
+      // Re-invoke the model so it ACTS on the findings (writes the thing the user
+      // asked for) instead of leaving the note sitting in the chat. One-shot: a
+      // continuation never itself auto-continues, so research can't loop.
+      if (!continuationInFlight) {
+        continuationInFlight = true;
+        try {
+          const anchorId = get().app.chat.at(-1)?.id ?? "";
+          await runTurn(RESEARCH_CONTINUE_CUE, new Set(), anchorId, 0);
+        } finally {
+          continuationInFlight = false;
+        }
+      }
     }
 
     async function handleExport(
@@ -600,6 +625,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     // during an in-flight turn simply wait for the next coalesced batch.
     const pendingUtterances: PendingUtterance[] = [];
     let processingTurns = false;
+    // Guards the post-research auto-continue against looping (a continuation turn
+    // that itself researches must not spawn another continuation).
+    let continuationInFlight = false;
 
     function kickTurns(): void {
       if (processingTurns) return;
@@ -729,6 +757,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       micLevel: 0,
       interimTranscript: "",
       micBackgrounded: false,
+      researching: false,
       workingAnchorId: null,
       sttPhase: "idle",
       listeningPhase: "idle",

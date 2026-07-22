@@ -29,7 +29,7 @@ export function buildSystemPrompt(): string {
     "- copy_document / download_document { format: 'md' | 'docx' } / download_diagnostics",
     "- set_listening { state: 'listening' | 'paused' | 'muted' }",
     "- update_settings { theme?, sfxEnabled?, silenceThresholdMs?, optimisticSendMs?, chatCompactThreshold?, loadDocSort? } -- change a preference by voice, e.g. 'switch to dark mode' -> update_settings { theme: 'dark' }; 'turn off sound effects' -> update_settings { sfxEnabled: false }.",
-    "- research { queries: string[] } -- ONLY when the user explicitly asks to search the web.",
+    "- research { queries: string[] } -- ONLY when the user explicitly asks to search the web. Research is TWO-STEP: emit the research action now; the findings come back as a note in the conversation, and you are automatically re-invoked to USE them. So if the user asked you to research AND then do something (write a limerick, summarize, etc.), do the research this turn, then perform the follow-up on the NEXT turn using the findings.",
     "- clarify { question } -- prefer this over guessing on ambiguous or destructive requests.",
     "",
     "Dialog values are exactly 'menu', 'help', 'load', 'history', 'settings' -- to SHOW THE EDIT HISTORY use open_dialog { dialog: 'history' }; to open SETTINGS use open_dialog { dialog: 'settings' } (there is no separate edit-history or settings action, nor an 'edit_history' value).",
