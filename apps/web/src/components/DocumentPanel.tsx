@@ -1,10 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { Annotation, EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { computeChange } from "../editor/changes";
 import { addHighlight, clearHighlights, editHighlights } from "../editor/highlight-extension";
 import { cursorField, setCursorPos } from "../editor/cursor-extension";
+import { markdownInline } from "../editor/markdown-extension";
+import { randomWelcome } from "../util/welcome";
 import { useAppStore, useStoreApi } from "../store/context";
 
 // The document surface: a CodeMirror 6 plain-text/markdown editor. Reducer edits
@@ -42,6 +44,8 @@ export function DocumentPanel() {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const lastDocIdRef = useRef<string | null>(null);
+  // A stable, randomly-framed welcome for the empty-document state.
+  const [welcome] = useState(randomWelcome);
 
   // Create the editor once.
   useEffect(() => {
@@ -56,6 +60,7 @@ export function DocumentPanel() {
           EditorView.lineWrapping,
           editHighlights(),
           cursorField,
+          markdownInline(),
           EditorView.updateListener.of((u) => {
             if (
               u.docChanged &&
@@ -131,11 +136,12 @@ export function DocumentPanel() {
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    // No document open -> no cursor (-1 clears the blue line).
     view.dispatch({
-      effects: setCursorPos.of(cursor),
+      effects: setCursorPos.of(doc ? cursor : -1),
       annotations: External.of(true),
     });
-  }, [cursor, doc?.text]);
+  }, [cursor, doc]);
 
   // Voice-driven scroll commands.
   useEffect(() => {
@@ -151,17 +157,95 @@ export function DocumentPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="qa-document-name border-b border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 dark:border-gray-800 dark:text-gray-200">
-        {doc ? doc.name : "No document"}
+      {doc && (
+        <div className="border-b border-gray-200 px-4 py-2 dark:border-gray-800">
+          <DocumentTitle name={doc.name} />
+        </div>
+      )}
+      <div className="relative flex-1 overflow-hidden">
+        <div
+          ref={hostRef}
+          // The editable document region. CodeMirror renders its own textbox
+          // inside; labelling the region names it for assistive tech.
+          role="region"
+          aria-label={doc ? `Document: ${doc.name}` : "Document editor"}
+          className="qa-document-editor h-full overflow-auto"
+        />
+        {!doc && (
+          // No document open: a centered welcome card over the (empty) editor.
+          <div className="absolute inset-0 flex items-center justify-center p-6">
+            <div className="qa-welcome max-w-md rounded-xl border border-gray-500/40 bg-gray-800 px-6 py-5 text-center shadow-lg dark:border-gray-600">
+              <div className="mb-1.5 text-base font-semibold text-gray-100">
+                {welcome.title}
+              </div>
+              <div className="text-sm leading-relaxed text-gray-300">
+                {welcome.body}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
-      <div
-        ref={hostRef}
-        // The editable document region. CodeMirror renders its own textbox
-        // inside; labelling the region names it for assistive tech.
-        role="region"
-        aria-label={doc ? `Document: ${doc.name}` : "Document editor"}
-        className="qa-document-editor flex-1 overflow-auto"
-      />
     </div>
+  );
+}
+
+// The document title, click-to-rename. Clicking the name swaps in a text field;
+// Enter or blur commits a rename_document action (same path the AI uses), Escape
+// cancels. Keeps the mouse-free promise intact -- voice rename still works too.
+function DocumentTitle({ name }: { name: string }) {
+  const api = useStoreApi();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  function commit() {
+    const next = draft.trim();
+    setEditing(false);
+    if (next && next !== name) {
+      api.getState().dispatch({ type: "rename_document", name: next }, "user");
+    }
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="qa-document-name-input w-full rounded border border-gray-300 bg-white px-1.5 py-0.5 text-sm font-medium text-gray-800 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setDraft(name);
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="qa-document-name -mx-1 rounded px-1 py-0.5 text-left text-sm font-medium text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-800"
+      title="Click to rename"
+      onClick={() => {
+        setDraft(name);
+        setEditing(true);
+      }}
+    >
+      {name}
+    </button>
   );
 }

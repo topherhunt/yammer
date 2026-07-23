@@ -77,10 +77,6 @@ export interface AppStore {
   /** True while the web-research pipeline is running (search -> read -> digest), so
    * the view can show a spinner -- the work continues after the triggering turn. */
   researching: boolean;
-  /** The assistant's message as it STREAMS in this turn (shown as a provisional
-   * bubble), before the turn is applied and it becomes a real ai_message. Empty when
-   * not mid-turn or when the model returns no message. */
-  streamingChat: string;
   /** The id of the LAST user message included in the LLM turn currently in flight,
    * so the view can show a "working" spinner beside it. Messages after it are queued
    * (spoken while the turn ran) and not yet seen by the model. Null when idle. */
@@ -740,9 +736,6 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       anchorId: string,
       sttSeconds?: number,
     ): Promise<void> {
-      // Commit any pending keyboard edits FIRST so the model sees + builds on a
-      // committed version, not an uncommitted live-text divergence.
-      flushKeyboardEdit();
       set({
         interimTranscript: "",
         workingAnchorId: anchorId,
@@ -776,30 +769,40 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           const streaming = typeof deps.api.turnStreaming === "function";
           // Streaming-apply bookkeeping (per attempt; streaming never retries).
           let streamedActionEvents = 0;
-          let chatCommitted = false;
-          const commitStreamingChat = () => {
-            const msg = get().streamingChat.trim();
-            set({ streamingChat: "" });
-            if (!chatCommitted && msg) {
-              chatCommitted = true;
-              pushEntry({ kind: "ai_message", id: newId(), at: now(), text: msg });
+          const streamMsgId = newId();
+          let chatStarted = false;
+          // Render the streaming message as a REAL chat entry, updated IN PLACE, so
+          // it doesn't blink out + re-animate when the turn finalizes (the old
+          // preview-then-commit swap caused a visible stutter every message).
+          const showStreamingChat = (t: string) => {
+            const text = t.trim();
+            if (!text) return;
+            if (!chatStarted) {
+              chatStarted = true;
+              pushEntry({ kind: "ai_message", id: streamMsgId, at: now(), text });
+            } else {
+              set((s) => ({
+                app: {
+                  ...s.app,
+                  chat: s.app.chat.map((e) =>
+                    e.id === streamMsgId && e.kind === "ai_message" ? { ...e, text } : e,
+                  ),
+                },
+              }));
             }
           };
 
           let result;
           try {
             if (streaming) {
-              // Apply as it streams: the message fills in live (provisional bubble),
-              // then EACH action is applied the moment its JSON closes + validates.
-              // A malformed action is skipped + surfaced; the valid ones already
-              // applied still stand (each is its own append-only version -- nothing
-              // to roll back). The ai_message is committed before its actions, matching
-              // the batch order.
+              // Apply as it streams: the message fills in live (in place, no blink),
+              // then EACH action is applied the moment its JSON closes + validates. A
+              // malformed action is skipped + surfaced; valid ones stand (each its own
+              // append-only version). The message streams BEFORE its actions.
               result = await deps.api.turnStreaming!(turnReq, {
-                onChat: (t) => set({ streamingChat: t }),
+                onChat: showStreamingChat,
                 onAction: (raw) => {
                   streamedActionEvents += 1;
-                  commitStreamingChat();
                   const pa = parseAction(raw);
                   if (!pa.ok) {
                     // eslint-disable-next-line no-console
@@ -821,8 +824,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
               result = await deps.api.turn(turnReq);
             }
           } catch (err) {
-            set({ streamingChat: "" });
-            if (!last) {
+            // Only retry when NOTHING was applied yet -- otherwise a retry would
+            // double-apply the message/actions already committed this stream.
+            if (!last && !chatStarted && streamedActionEvents === 0) {
               await delay(TURN_RETRY_DELAY_MS * attempt);
               continue;
             }
@@ -831,18 +835,20 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           }
 
           if (streaming) {
-            // Finalize: commit a chat-only message; reconcile any actions the stream
-            // didn't deliver as events (backstop, validated + idempotent via the
-            // event count); record usage; chirp. No whole-envelope retry -- the valid
-            // actions are already committed versions.
-            commitStreamingChat();
+            // Reconcile the AUTHORITATIVE final message: usually a no-op (already shown
+            // in place from deltas), but this also covers a message that arrived only in
+            // the final envelope with no deltas (showStreamingChat then creates it).
+            showStreamingChat(result.chatMessage ?? "");
+            // Reconcile any actions the stream didn't deliver as events (backstop,
+            // validated + idempotent via the event count); record usage; chirp. No
+            // whole-envelope retry -- valid actions are already committed versions.
             const all = Array.isArray(result.actions) ? result.actions : [];
             for (let k = streamedActionEvents; k < all.length; k++) {
               const pa = parseAction(all[k]);
               if (pa.ok) get().dispatch(pa.action, "ai");
             }
             set((s) => ({ usages: [...s.usages, result.usage] }));
-            if (all.length > 0 || chatCommitted) sfx("receive");
+            if (all.length > 0 || chatStarted) sfx("receive");
             return;
           }
 
@@ -851,7 +857,6 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             actions: result.actions,
           });
           if (parsed.ok) {
-            set({ streamingChat: "" });
             applyResponse(parsed.response, result.usage);
             // A soft chirp when the AI responds with an action or a message, so the
             // user knows their turn landed without watching the sidebar.
@@ -884,7 +889,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       } catch (err) {
         surfaceError(`Turn failed: ${errMessage(err)}`);
       } finally {
-        set({ sttPhase: "idle", workingAnchorId: null, streamingChat: "" });
+        set({ sttPhase: "idle", workingAnchorId: null });
       }
     }
 
@@ -896,7 +901,6 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       interimTranscript: "",
       micBackgrounded: false,
       researching: false,
-      streamingChat: "",
       workingAnchorId: null,
       sttPhase: "idle",
       listeningPhase: "idle",
@@ -1005,6 +1009,10 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       submitTranscript(text, sttSeconds) {
         const trimmed = text.trim();
         if (!trimmed) return Promise.resolve();
+        // Commit any pending keyboard edits FIRST -- BEFORE the user's message bubble
+        // -- so the "Edited by keyboard" marker lands in chronological order (typed,
+        // then spoke) and the model builds on a committed version, not live text.
+        flushKeyboardEdit();
         // Show the message as a bubble IMMEDIATELY (so several quick utterances stack
         // visibly), then queue it. The loop coalesces all pending utterances into one
         // turn; the returned promise resolves once THIS utterance's turn has fully

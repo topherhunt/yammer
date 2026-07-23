@@ -411,6 +411,7 @@ export function applyAction(
         undoStack: [version.id],
         undoCursor: 0,
         cursor: 0, // empty new doc -- cursor at the start
+        openDialog: null, // dismiss the menu when "New document" is chosen
       };
       // A visible divider in the (retained) transcript so the user always sees the
       // boundary; the same entry anchors the LLM context to this document.

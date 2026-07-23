@@ -118,8 +118,12 @@ export function ChatSidebar() {
   // The research pipeline outlives the turn that launched it; keep a spinner on the
   // latest entry while it runs so the user knows work is still in flight.
   const researching = useAppStore((s) => s.researching);
-  // The assistant's reply as it streams in this turn (before it's applied).
-  const streamingChat = useAppStore((s) => s.streamingChat);
+  // The last entry's text -- the streaming reply updates this entry in place as it
+  // types, so tracking it lets the auto-scroll keep pinning to the bottom as it grows.
+  const lastEntryText = useAppStore((s) => {
+    const last = s.app.chat[s.app.chat.length - 1];
+    return last && "text" in last ? last.text : "";
+  });
   const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
@@ -143,7 +147,7 @@ export function ChatSidebar() {
     });
     return () => cancelAnimationFrame(raf);
     // Also re-pin as the streaming reply grows, so it stays in view while it types.
-  }, [chat.length, streamingChat]);
+  }, [chat.length, lastEntryText]);
 
   return (
     <div className="flex h-full flex-col">
@@ -201,14 +205,6 @@ export function ChatSidebar() {
               </li>
             );
           })
-        )}
-        {streamingChat && (
-          // The assistant's reply as it streams in, before the turn is applied.
-          <li className="qa-chat-streaming self-start max-w-[85%]">
-            <div className="qa-chat-entry qa-chat-ai max-w-full rounded-lg bg-gray-100 px-3 py-2 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-100">
-              {streamingChat}
-            </div>
-          </li>
         )}
       </ul>
       <ChatComposer />

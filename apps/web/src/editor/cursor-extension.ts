@@ -35,8 +35,13 @@ export const cursorField = StateField.define<DecorationSet>({
     deco = deco.map(tr.changes);
     for (const e of tr.effects) {
       if (e.is(setCursorPos)) {
-        const pos = Math.max(0, Math.min(e.value, tr.state.doc.length));
-        deco = Decoration.set([cursorMark.range(pos)]);
+        // A negative offset means "no cursor" (e.g. no document open) -- clear it.
+        if (e.value < 0) {
+          deco = Decoration.none;
+        } else {
+          const pos = Math.min(e.value, tr.state.doc.length);
+          deco = Decoration.set([cursorMark.range(pos)]);
+        }
       }
     }
     return deco;

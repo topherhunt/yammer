@@ -128,16 +128,16 @@
   margin: 0 -1px;
   vertical-align: text-bottom;
   border-left: 2px solid #3b82f6;
-  animation: qa-doc-cursor-blink 1.15s ease-in-out infinite;
+  /* step-end = a hard on/off blink, not a hazy fade. */
+  animation: qa-doc-cursor-blink 1.06s step-end infinite;
 }
 
 @keyframes qa-doc-cursor-blink {
-  0%,
-  100% {
+  0% {
     opacity: 1;
   }
   50% {
-    opacity: 0.2;
+    opacity: 0;
   }
 }
 
@@ -145,6 +145,16 @@
   .qa-doc-cursor {
     animation: none;
   }
+}
+
+/* Inline markdown rendering: the asterisk markers are hidden (unless the cursor is in
+   the span) and the content between them is styled. */
+.qa-md-bold {
+  font-weight: 700;
+}
+
+.qa-md-italic {
+  font-style: italic;
 }
 
 /* CodeMirror fills its pane and reads as a plain writing surface. */
