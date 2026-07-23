@@ -180,7 +180,16 @@ export interface StoreDeps {
 
 export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
   let idCounter = 0;
-  const newId = deps.newId ?? (() => `id-${++idCounter}`);
+  // Default to GLOBALLY-UNIQUE ids. A per-session counter (used only when a caller
+  // injects its own -- e.g. deterministic tests) reused ids across reloads and
+  // collided with prior sessions' documents/versions on the server, desyncing the
+  // head and losing work. A forgetful caller must never re-introduce that.
+  const newId =
+    deps.newId ??
+    (() =>
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `id-${++idCounter}-${Math.random().toString(36).slice(2)}`);
   const now = deps.now ?? (() => new Date().toISOString());
   let scrollNonce = 0;
   /** A tap-to-start that arrived before the voice pipeline was ready; run on
@@ -354,6 +363,16 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           // those and reconcile; pending edits for other documents the user
           // switched away from must not be silently dropped.
           const conflictedDoc = item.version.documentId;
+          // Preserve the un-persisted work in the debug log BEFORE dropping it. On a
+          // single device a 409 is a bug, and the reconcile reload discards these
+          // local edits -- logging their full text means the user's writing is never
+          // truly unrecoverable (it's in yammer-debug.log).
+          reportClientDebug("persist-conflict-dropped", {
+            documentId: conflictedDoc,
+            dropped: persistQueue
+              .filter((p) => p.version.documentId === conflictedDoc)
+              .map((p) => ({ seq: p.version.seq, kind: p.version.kind, text: p.version.fullText })),
+          });
           for (let i = persistQueue.length - 1; i >= 0; i--) {
             if (persistQueue[i]!.version.documentId === conflictedDoc) {
               persistQueue.splice(i, 1);

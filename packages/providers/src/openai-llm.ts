@@ -201,8 +201,14 @@ export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
       });
 
       let finalResponse: unknown;
+      // Accumulate the deltas ourselves: the `response.completed` event's response
+      // object does NOT reliably carry the aggregated `output_text` (that's a
+      // convenience field on the non-streaming response), so we rebuild it from the
+      // stream and inject it -- otherwise the final parse sees "no output text".
+      let accumulated = "";
       for await (const event of stream as AsyncIterable<StreamEvent>) {
         if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+          accumulated += event.delta;
           onTextDelta(event.delta);
         } else if (event.type === "response.completed" && event.response) {
           finalResponse = event.response;
@@ -211,9 +217,15 @@ export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
       if (finalResponse === undefined) {
         throw new Error("OpenAI stream ended without a completed response");
       }
-      return parseOpenAiResponse(
-        finalResponse as Parameters<typeof parseOpenAiResponse>[0],
-      );
+      const finalObj = finalResponse as Record<string, unknown>;
+      const outputText =
+        typeof finalObj.output_text === "string" && finalObj.output_text.trim() !== ""
+          ? (finalObj.output_text as string)
+          : accumulated;
+      return parseOpenAiResponse({
+        ...finalObj,
+        output_text: outputText,
+      } as Parameters<typeof parseOpenAiResponse>[0]);
     },
   };
 }

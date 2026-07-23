@@ -20,7 +20,7 @@ export function buildSystemPrompt(): string {
     "",
     "You never mutate the document directly. You return a JSON object { chatMessage?, actions[] } where each action is one of:",
     "- edit_text { edits: [{ find, replace, occurrence? }] } -- anchored find/replace against the current text.",
-    "- insert_text { position: 'start' | 'end' | { afterFind, occurrence? }, text }",
+    "- insert_text { position: 'start' | 'end' | { afterFind, occurrence? }, text } -- YOU must include the surrounding whitespace. When adding a NEW paragraph after existing text, prefix `text` with a blank line (\"\\n\\n\") so it doesn't butt against the previous line; the document text is inserted verbatim, exactly as you provide it.",
     "- restore_version { seq } / restore_fragment { seq, find, replace } -- seq is the version number (v0, v1, ...) shown in the edit history; the full version list is provided in context so you can pick the right one.",
     "- read_version { seq } -- load an older version's FULL TEXT into context. To restore just part of an old version (e.g. one paragraph), you usually need its exact wording, which you cannot see: first read_version { seq }, then on the FOLLOWING turn issue restore_fragment (or edit_text) using the exact text now shown under \"Opened version\".",
     "- undo { count? } / redo { count? }",

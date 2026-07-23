@@ -53,6 +53,17 @@ const seedCreate = createVersion({
   summary: "Created document",
 });
 
+/** Globally-unique ids for the REAL app. The store's default newId is a per-session
+ * counter (`id-1, id-2, ...`) -- deterministic and fine for tests, but it RESETS on
+ * every reload, so a new session's document/version ids collided with a prior
+ * session's on the server: those writes came back "idempotent" (already exist), the
+ * document head never advanced, and the next edit hit a spurious 409 that discarded
+ * the user's work. UUIDs never collide across sessions. */
+const uniqueId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
 let singleton: StoreApi<AppStore> | null = null;
 
 export function getDefaultStore(): StoreApi<AppStore> {
@@ -75,6 +86,7 @@ export function getDefaultStore(): StoreApi<AppStore> {
     let voiceSfx: Sfx | null = null;
     const store = createAppStore({
       api,
+      newId: uniqueId, // globally-unique across reloads (see uniqueId above)
       stt: new MockStt(), // inert here; the VoiceController owns real capture
       sfx: {
         preload: async () => {},
@@ -132,6 +144,7 @@ export function getDefaultStore(): StoreApi<AppStore> {
 
   singleton = createAppStore({
     api,
+    newId: uniqueId,
     stt: new MockStt(),
     initial: {
       activeDocument: {

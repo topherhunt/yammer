@@ -232,6 +232,23 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
     // this is the client's seq-0 "create" version: that IS the creation, so create
     // the document row from it (client-authoritative creation) and return. Any other
     // version for a missing doc is a genuine 404.
+    // Full persist tracing (opt-in): logs EVERY version write outcome + the seq
+    // progression, so a seq desync (the "out of sync / lost changes" bug) is fully
+    // reconstructable from yammer-debug.log without guessing.
+    const pdebug = !!process.env.YAMMER_TURN_DEBUG;
+    const plog = (outcome: string, extra: Record<string, unknown> = {}) => {
+      if (pdebug) {
+        debugLog("persist", {
+          documentId: id,
+          versionId: version.id,
+          seq: version.seq,
+          kind: version.kind,
+          outcome,
+          ...extra,
+        });
+      }
+    };
+
     const doc = await repos.documents.get(user.id, id);
     if (!doc) {
       if (version.seq === 0 && version.kind === "create") {
@@ -245,27 +262,34 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
             name,
             version,
           });
+          plog("auto-created");
           return c.json({ document: created, version }, 201);
         } catch (err) {
           if (isUniqueViolation(err)) {
             // The doc was created concurrently (double-submit of the create). Treat
             // as success -- the version is already stored.
+            plog("auto-create-dup");
             return c.json({ version }, 200);
           }
           throw err;
         }
       }
+      plog("not-found");
       return c.json({ error: "not found" }, 404);
     }
 
     // Idempotent: a version already stored under this id is a no-op success, so a
     // client retry after a dropped response never errors or double-appends.
     const existing = await repos.versions.get(user.id, version.id);
-    if (existing) return c.json({ version: existing });
+    if (existing) {
+      plog("idempotent", { head: doc.currentSeq });
+      return c.json({ version: existing });
+    }
 
     // Append-only + monotonic: the new version must be exactly head + 1. A gap or a
     // seq already used by a DIFFERENT id (seq <= head) is a conflict, not an append.
     if (version.seq !== doc.currentSeq + 1) {
+      plog("conflict", { expectedSeq: doc.currentSeq + 1, head: doc.currentSeq });
       return c.json(
         {
           error: `seq conflict: expected ${doc.currentSeq + 1}, got ${version.seq}`,
@@ -281,6 +305,7 @@ export function registerRoutes(app: Hono, deps: RouteDeps): void {
         : undefined;
     try {
       const saved = await repos.versions.append(user.id, version, undo);
+      plog("appended", { newHead: version.seq });
       return c.json({ version: saved }, 201);
     } catch (err) {
       // A truly concurrent append that passed the seq === head+1 check above but
