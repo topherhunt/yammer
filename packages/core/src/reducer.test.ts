@@ -1,4 +1,4 @@
-import type { ChatEntry, Effect } from "@yammer/shared";
+import type { AppState, ChatEntry, Effect } from "@yammer/shared";
 import { initialState } from "@yammer/shared";
 import { describe, expect, it } from "vitest";
 import { applyAction, applyActions, applyTurn } from "./reducer";
@@ -11,6 +11,37 @@ function effectTypes(effects: Effect[]): string[] {
 function lastChat(chat: ChatEntry[]): ChatEntry {
   return chat[chat.length - 1]!;
 }
+
+describe("commit_keyboard_edit", () => {
+  it("snapshots the current (typed) text as one version, diffed from the head", () => {
+    // Keyboard divergence: the live text changed without a version.
+    const s = docState("hello");
+    const typed: AppState = {
+      ...s,
+      activeDocument: { ...s.activeDocument!, text: "hello world" },
+    };
+    const { state, effects } = applyAction(
+      typed,
+      { type: "commit_keyboard_edit" },
+      makeCtx("user"),
+    );
+    expect(state.history).toHaveLength(s.history.length + 1);
+    expect(state.history.at(-1)?.fullText).toBe("hello world");
+    expect(state.history.at(-1)?.author).toBe("user");
+    expect(effectTypes(effects)).toEqual(["persist_version"]);
+  });
+
+  it("is a no-op when the live text already matches the head version", () => {
+    const s = docState("hello"); // text == head.fullText
+    const { state, effects } = applyAction(
+      s,
+      { type: "commit_keyboard_edit" },
+      makeCtx("user"),
+    );
+    expect(state.history).toHaveLength(s.history.length);
+    expect(effects).toEqual([]);
+  });
+});
 
 describe("cursor", () => {
   it("moves the cursor to the end of the changed text after an edit", () => {

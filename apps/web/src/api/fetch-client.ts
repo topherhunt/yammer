@@ -207,10 +207,12 @@ export class FetchApiClient implements ApiClient {
       body.undoCursor = undo.undoCursor;
     }
     if (documentName !== undefined) body.documentName = documentName;
-    await this.requestJson(
-      `/api/documents/${version.documentId}/versions`,
-      this.jsonInit("POST", body),
-    );
+    await this.requestJson(`/api/documents/${version.documentId}/versions`, {
+      ...this.jsonInit("POST", body),
+      // Survive a page unload (e.g. a keyboard-edit flush on refresh), so the version
+      // still reaches the server. Bodies are small snapshots, within the keepalive cap.
+      keepalive: true,
+    });
   }
 
   async persistSettings(settings: Settings): Promise<void> {

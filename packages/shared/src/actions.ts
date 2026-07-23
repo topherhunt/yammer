@@ -41,6 +41,13 @@ export const insertTextAction = z.object({
   text: z.string().min(1),
 });
 
+/** Commit the current (keyboard-typed) document text as ONE version. Client-internal
+ * -- emitted by the store's debounce, never by the LLM (not in the prompt). Groups a
+ * burst of typing into a single history snapshot. */
+export const commitKeyboardEditAction = z.object({
+  type: z.literal("commit_keyboard_edit"),
+});
+
 /** Move the insertion cursor (the blue line) without editing text. */
 export const placeCursorAction = z.object({
   type: z.literal("place_cursor"),
@@ -190,6 +197,7 @@ export const clarifyAction = z.object({
 export const actionSchema = z.discriminatedUnion("type", [
   editTextAction,
   insertTextAction,
+  commitKeyboardEditAction,
   placeCursorAction,
   restoreVersionAction,
   restoreFragmentAction,

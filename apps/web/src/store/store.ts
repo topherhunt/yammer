@@ -318,6 +318,17 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       typeof window.addEventListener === "function"
     ) {
       window.addEventListener("online", () => kickDrain());
+      // Persist any pending keyboard edits when the user leaves: tab-hide (the page
+      // is still alive, so the save completes) and unload (the persist fetch uses
+      // keepalive, so it survives the navigation). Typed text is never lost on a
+      // refresh -- flushKeyboardEdit is hoisted; the keyboard state it reads is set
+      // by the time these callbacks fire.
+      window.addEventListener("beforeunload", () => flushKeyboardEdit());
+      if (typeof document !== "undefined") {
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) flushKeyboardEdit();
+        });
+      }
     }
 
     async function attemptPersist(
@@ -440,6 +451,8 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       byName?: string;
       byDate?: string;
     }): Promise<void> {
+      // Persist any pending keyboard edits to the CURRENT doc before switching away.
+      flushKeyboardEdit();
       const payload = await deps.api.getDocument(e.documentId, e.byName, e.byDate);
       set((s) => ({
         app: {
@@ -657,6 +670,37 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
     // that itself researches must not spawn another continuation).
     let continuationInFlight = false;
 
+    // -- Keyboard-edit grouping --------------------------------------------
+    // Direct keyboard edits update the live text instantly (setDocumentText) but are
+    // snapshotted into ONE version per ~1-minute burst -- so history isn't spammed
+    // with a version per keystroke (which would also confuse the AI). The pending
+    // group is FLUSHED early before a voice turn, a document switch, tab-hide, and
+    // page unload, so typed text ALWAYS persists and is never lost on refresh.
+    const KEYBOARD_GROUP_MS = 60_000;
+    let keyboardTimer: ReturnType<typeof setTimeout> | null = null;
+    let keyboardGroupOpen = false;
+
+    function commitKeyboardEdit(): void {
+      if (keyboardTimer !== null) {
+        clearTimeout(keyboardTimer);
+        keyboardTimer = null;
+      }
+      keyboardGroupOpen = false;
+      // commit_keyboard_edit is a no-op if nothing diverged from the head version.
+      get().dispatch({ type: "commit_keyboard_edit" }, "user");
+    }
+    /** A keystroke landed: open a 1-minute group on the FIRST edit; later edits in the
+     * window ride the same timer (so a burst becomes one version). */
+    function noteKeyboardEdit(): void {
+      if (keyboardGroupOpen) return;
+      keyboardGroupOpen = true;
+      keyboardTimer = setTimeout(commitKeyboardEdit, KEYBOARD_GROUP_MS);
+    }
+    /** Commit the pending keyboard group NOW (before a turn / switch / unload). */
+    function flushKeyboardEdit(): void {
+      if (keyboardGroupOpen) commitKeyboardEdit();
+    }
+
     function kickTurns(): void {
       if (processingTurns) return;
       processingTurns = true;
@@ -696,6 +740,9 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       anchorId: string,
       sttSeconds?: number,
     ): Promise<void> {
+      // Commit any pending keyboard edits FIRST so the model sees + builds on a
+      // committed version, not an uncommitted live-text divergence.
+      flushKeyboardEdit();
       set({
         interimTranscript: "",
         workingAnchorId: anchorId,
@@ -992,6 +1039,8 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             ? { app: { ...s.app, activeDocument: { ...s.app.activeDocument, text } } }
             : s,
         );
+        // Group this keystroke into the pending ~1-minute keyboard-edit version.
+        noteKeyboardEdit();
       },
 
       setCursor(offset) {

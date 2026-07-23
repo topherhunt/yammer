@@ -308,6 +308,25 @@ describe("dialog + document effects", () => {
   });
 });
 
+describe("keyboard-edit versioning", () => {
+  it("does NOT version a keystroke immediately, but flushes to one version before a turn (persisted)", async () => {
+    const { store, api } = makeStore();
+
+    // Simulate keyboard typing -- updates live text, no version yet.
+    store.getState().setDocumentText("the cat sat down");
+    expect(api.persistedVersions).toHaveLength(0);
+
+    // A voice turn flushes the pending keyboard group FIRST, so it becomes a
+    // committed, persisted version the model can build on.
+    await store.getState().submitTranscript("ok");
+    await store.getState().flushPersistQueue();
+
+    const kb = api.persistedVersions.find((v) => v.fullText === "the cat sat down");
+    expect(kb).toBeDefined();
+    expect(kb!.kind).toBe("edit");
+  });
+});
+
 describe("durable version persistence", () => {
   it("persists the undo timeline alongside the version (N3)", async () => {
     const { store, api } = makeStore();

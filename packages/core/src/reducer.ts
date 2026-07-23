@@ -240,6 +240,22 @@ export function applyAction(
       });
     }
 
+    case "commit_keyboard_edit": {
+      // Snapshot the current (keyboard-typed) text as one version, IF it diverged
+      // from the head. commitVersion diffs against the head version, so it captures
+      // exactly what was typed since the last version. No-op when nothing changed.
+      if (!state.activeDocument) return { state, effects: [] };
+      const head = currentVersion(state.history);
+      if (head && head.fullText === state.activeDocument.text) {
+        return { state, effects: [] };
+      }
+      return commitVersion(state, ctx, {
+        newText: state.activeDocument.text,
+        kind: "edit",
+        summary: "Edited by keyboard",
+      });
+    }
+
     case "place_cursor": {
       if (!state.activeDocument) {
         return errorResult(state, ctx, "No document is open to place the cursor in.");
