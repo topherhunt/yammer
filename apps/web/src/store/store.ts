@@ -20,6 +20,7 @@ import {
   applyAction,
   applyTurn,
   assembleContext,
+  parseAction,
   parseLlmResponse,
 } from "@yammer/core";
 import type { Ctx } from "@yammer/core";
@@ -76,6 +77,10 @@ export interface AppStore {
   /** True while the web-research pipeline is running (search -> read -> digest), so
    * the view can show a spinner -- the work continues after the triggering turn. */
   researching: boolean;
+  /** The assistant's message as it STREAMS in this turn (shown as a provisional
+   * bubble), before the turn is applied and it becomes a real ai_message. Empty when
+   * not mid-turn or when the model returns no message. */
+  streamingChat: string;
   /** The id of the LAST user message included in the LLM turn currently in flight,
    * so the view can show a "working" spinner beside it. Messages after it are queued
    * (spoken while the turn ran) and not yet seen by the model. Null when idle. */
@@ -692,15 +697,61 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
         // bug is diagnosable rather than a bare "expected string, received null".
         for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt++) {
           const last = attempt >= MAX_TURN_ATTEMPTS;
+          const turnReq = {
+            transcript: text,
+            context,
+            ...(documentId !== undefined ? { documentId } : {}),
+            ...(sttSeconds !== undefined ? { sttSeconds } : {}),
+          };
+          const streaming = typeof deps.api.turnStreaming === "function";
+          // Streaming-apply bookkeeping (per attempt; streaming never retries).
+          let streamedActionEvents = 0;
+          let chatCommitted = false;
+          const commitStreamingChat = () => {
+            const msg = get().streamingChat.trim();
+            set({ streamingChat: "" });
+            if (!chatCommitted && msg) {
+              chatCommitted = true;
+              pushEntry({ kind: "ai_message", id: newId(), at: now(), text: msg });
+            }
+          };
+
           let result;
           try {
-            result = await deps.api.turn({
-              transcript: text,
-              context,
-              ...(documentId !== undefined ? { documentId } : {}),
-              ...(sttSeconds !== undefined ? { sttSeconds } : {}),
-            });
+            if (streaming) {
+              // Apply as it streams: the message fills in live (provisional bubble),
+              // then EACH action is applied the moment its JSON closes + validates.
+              // A malformed action is skipped + surfaced; the valid ones already
+              // applied still stand (each is its own append-only version -- nothing
+              // to roll back). The ai_message is committed before its actions, matching
+              // the batch order.
+              result = await deps.api.turnStreaming!(turnReq, {
+                onChat: (t) => set({ streamingChat: t }),
+                onAction: (raw) => {
+                  streamedActionEvents += 1;
+                  commitStreamingChat();
+                  const pa = parseAction(raw);
+                  if (!pa.ok) {
+                    // eslint-disable-next-line no-console
+                    console.error(`[turn] skipped a malformed streamed action: ${pa.error}`, raw);
+                    surfaceError(`An AI action couldn't be applied and was skipped: ${pa.error}`);
+                    return;
+                  }
+                  // A throw from applying an action must NOT propagate to the request
+                  // retry -- earlier actions already applied, and retrying would
+                  // double-apply them. Surface and move on.
+                  try {
+                    get().dispatch(pa.action, "ai");
+                  } catch (err) {
+                    surfaceError(`Applying an AI action failed: ${errMessage(err)}`);
+                  }
+                },
+              });
+            } else {
+              result = await deps.api.turn(turnReq);
+            }
           } catch (err) {
+            set({ streamingChat: "" });
             if (!last) {
               await delay(TURN_RETRY_DELAY_MS * attempt);
               continue;
@@ -709,11 +760,28 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             return;
           }
 
+          if (streaming) {
+            // Finalize: commit a chat-only message; reconcile any actions the stream
+            // didn't deliver as events (backstop, validated + idempotent via the
+            // event count); record usage; chirp. No whole-envelope retry -- the valid
+            // actions are already committed versions.
+            commitStreamingChat();
+            const all = Array.isArray(result.actions) ? result.actions : [];
+            for (let k = streamedActionEvents; k < all.length; k++) {
+              const pa = parseAction(all[k]);
+              if (pa.ok) get().dispatch(pa.action, "ai");
+            }
+            set((s) => ({ usages: [...s.usages, result.usage] }));
+            if (all.length > 0 || chatCommitted) sfx("receive");
+            return;
+          }
+
           const parsed = parseLlmResponse({
             chatMessage: result.chatMessage,
             actions: result.actions,
           });
           if (parsed.ok) {
+            set({ streamingChat: "" });
             applyResponse(parsed.response, result.usage);
             // A soft chirp when the AI responds with an action or a message, so the
             // user knows their turn landed without watching the sidebar.
@@ -746,7 +814,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       } catch (err) {
         surfaceError(`Turn failed: ${errMessage(err)}`);
       } finally {
-        set({ sttPhase: "idle", workingAnchorId: null });
+        set({ sttPhase: "idle", workingAnchorId: null, streamingChat: "" });
       }
     }
 
@@ -758,6 +826,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
       interimTranscript: "",
       micBackgrounded: false,
       researching: false,
+      streamingChat: "",
       workingAnchorId: null,
       sttPhase: "idle",
       listeningPhase: "idle",

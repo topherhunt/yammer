@@ -260,6 +260,47 @@ describe("POST /api/turn (thin relay)", () => {
     expect(turns[0]!.chatMessage).toBe("Added your sentence.");
   });
 
+  it("streams the turn as SSE when the client asks (chat text live, then a done event)", async () => {
+    const { repos } = createTestDb();
+    const user = await seedUser(repos);
+    const doc = await repos.documents.create(user.id, { name: "Doc" });
+    const llm = new FakeLlm([
+      llmResult([{ type: "insert_text", position: "end", text: "Hi" }], {
+        chatMessage: "On it -- adding that now.",
+        usage: { inputTokens: 100, cachedInputTokens: 0, outputTokens: 5 },
+        raw: { r: 1 },
+      }),
+    ]);
+    const app = buildApp({ repos, llm, search: new FakeSearch() });
+
+    const res = await app.request("/api/turn", {
+      method: "POST",
+      headers: { ...jsonHeaders(user.id), accept: "text/event-stream" },
+      body: JSON.stringify({ transcript: "add hi", context: contextForDoc(doc), documentId: doc.id }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    // Parse the SSE frames.
+    const body = await res.text();
+    const events = body
+      .split("\n\n")
+      .filter((f) => f.startsWith("data: "))
+      .map((f) => JSON.parse(f.slice("data: ".length)) as { type: string; text?: string; chatMessage?: string; actions?: unknown[] });
+
+    // At least one live chat delta, ending at the full message...
+    const chats = events.filter((e) => e.type === "chat");
+    expect(chats.length).toBeGreaterThan(0);
+    expect(chats.at(-1)!.text).toBe("On it -- adding that now.");
+    // ...and a final done with the full result the client applies.
+    const done = events.find((e) => e.type === "done");
+    expect(done?.chatMessage).toBe("On it -- adding that now.");
+    expect((done?.actions?.[0] as { type: string }).type).toBe("insert_text");
+
+    // The diagnostic Turn is still recorded, exactly like the non-streamed path.
+    expect(await repos.turns.listForDocument(user.id, doc.id)).toHaveLength(1);
+  });
+
   it("still relays raw actions when the model output is invalid, logging [] actions", async () => {
     // The client is authoritative and re-validates, so the relay does not 4xx on a
     // bad envelope -- it hands the raw actions back and logs an empty action set.

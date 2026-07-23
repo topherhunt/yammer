@@ -166,14 +166,18 @@ describe("submitTranscript turn loop", () => {
     expect(store.getState().researching).toBe(false); // spinner flag cleared
   });
 
-  it("retries an invalid LLM response a few times, then surfaces a chat error", async () => {
+  it("skips a malformed streamed action + surfaces it, applying the valid ones (no whole-turn retry)", async () => {
     let calls = 0;
     const { store } = makeStore({
       api: {
         turnResponder: () => {
           calls += 1;
           return {
-            actions: [{ type: "not_a_real_action" }],
+            // One valid action, one malformed -- streaming applies per-action.
+            actions: [
+              { type: "insert_text", position: "end", text: " ok" },
+              { type: "not_a_real_action" },
+            ],
             usage: { sttSeconds: 1, inputTokens: 10, cachedInputTokens: 0, outputTokens: 1 },
             raw: {},
           };
@@ -181,18 +185,16 @@ describe("submitTranscript turn loop", () => {
       },
     });
 
-    await store.getState().submitTranscript("do something weird");
+    await store.getState().submitTranscript("do two things");
 
     const state = store.getState();
-    // An unusable turn (a UI-driving AI emitting a bad action) is retried before we
-    // give up -- three total attempts here, since the mock is always invalid.
-    expect(calls).toBe(3);
-    const last = state.app.chat.at(-1);
-    expect(last?.kind).toBe("error");
-    // The document is untouched by an invalid turn.
-    expect(state.app.activeDocument?.text).toBe("the cat sat");
-    // Each attempt was billed, so usage is recorded once per attempt.
-    expect(state.usages).toHaveLength(3);
+    // Streaming applies each action as it validates: the good one lands, the bad one
+    // is skipped + surfaced -- NOT whole-turn-retried (append-only versions already
+    // committed, nothing to roll back).
+    expect(calls).toBe(1);
+    expect(state.app.activeDocument?.text).toBe("the cat sat ok"); // the valid action applied
+    expect(state.app.chat.some((e) => e.kind === "error")).toBe(true); // the bad one surfaced
+    expect(state.usages).toHaveLength(1); // billed once
   });
 });
 

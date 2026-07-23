@@ -46,6 +46,14 @@ export interface LlmResult {
 
 export interface LlmProvider {
   complete(req: LlmRequest): Promise<LlmResult>;
+  /** Stream the model's raw output text via `onTextDelta` as it generates, and
+   * resolve with the final parsed result (same shape as complete()). Optional --
+   * callers fall back to complete() when a provider doesn't implement it. Used to
+   * show the assistant's reply live and cut perceived wait time. */
+  completeStreaming?(
+    req: LlmRequest,
+    onTextDelta: (delta: string) => void,
+  ): Promise<LlmResult>;
 }
 
 /** Streaming speech-to-text. Interim results drive the live indicator; the

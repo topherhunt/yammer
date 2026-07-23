@@ -60,10 +60,23 @@ export class ApiError extends Error {
   }
 }
 
+/** Live callbacks for a streamed turn. `onChat` gets the assistant's message so far
+ * (replace, not append); `onAction` gets each complete, still-UNVALIDATED action as
+ * its JSON closes (the store validates + applies each). */
+export interface TurnStreamCallbacks {
+  onChat: (text: string) => void;
+  onAction: (action: unknown) => void;
+}
+
 export interface ApiClient {
   /** POST /api/turn -- transcript + situational context in, structured LLM
    * result (unvalidated actions) out. The store validates with parseLlmResponse. */
   turn(req: TurnRequest): Promise<LlmResult>;
+  /** POST /api/turn as an SSE stream: the same final LlmResult as turn(), but the
+   * assistant's message (`onChat`) and each COMPLETE action (`onAction`) arrive live
+   * as the model generates, so both the reply and the edits appear without waiting
+   * for the whole response. Optional -- the store falls back to turn() when absent. */
+  turnStreaming?(req: TurnRequest, cb: TurnStreamCallbacks): Promise<LlmResult>;
 
   listDocuments(sort: SortKey): Promise<DocumentMeta[]>;
   getDocument(

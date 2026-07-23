@@ -14,6 +14,7 @@ import type {
   PersistUndo,
   ResearchResult,
   TurnRequest,
+  TurnStreamCallbacks,
 } from "./client";
 
 // The real backend client: a thin HTTP wrapper over apps/server's routes. The
@@ -74,6 +75,77 @@ export class FetchApiClient implements ApiClient {
     if (req.sttSeconds !== undefined) body.sttSeconds = req.sttSeconds;
     if (req.sttMeta !== undefined) body.sttMeta = req.sttMeta;
     return this.requestJson<LlmResult>("/api/turn", this.jsonInit("POST", body));
+  }
+
+  async turnStreaming(
+    req: TurnRequest,
+    cb: TurnStreamCallbacks,
+  ): Promise<LlmResult> {
+    const body: Record<string, unknown> = { transcript: req.transcript, context: req.context };
+    if (req.documentId !== undefined) body.documentId = req.documentId;
+    if (req.sttSeconds !== undefined) body.sttSeconds = req.sttSeconds;
+    if (req.sttMeta !== undefined) body.sttMeta = req.sttMeta;
+
+    const res = await fetch(this.url("/api/turn"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new ApiError(`POST /api/turn failed: ${res.status} ${res.statusText}`, res.status);
+    }
+    // The server may decline to stream (no SSE content-type) -- fall back to JSON.
+    if (!res.body || !(res.headers.get("content-type") ?? "").includes("event-stream")) {
+      return (await res.json()) as LlmResult;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let final: LlmResult | null = null;
+    let errorMessage: string | null = null;
+
+    const handle = (dataLine: string) => {
+      if (!dataLine) return;
+      const evt = JSON.parse(dataLine) as {
+        type: string;
+        text?: string;
+        action?: unknown;
+        chatMessage?: string | null;
+        actions?: unknown[];
+        usage?: LlmResult["usage"];
+        raw?: unknown;
+        message?: string;
+      };
+      if (evt.type === "chat") cb.onChat(evt.text ?? "");
+      else if (evt.type === "action") cb.onAction(evt.action);
+      else if (evt.type === "done") {
+        final = {
+          ...(evt.chatMessage != null ? { chatMessage: evt.chatMessage } : {}),
+          actions: evt.actions ?? [],
+          usage: evt.usage!,
+          raw: evt.raw,
+        };
+      } else if (evt.type === "error") errorMessage = evt.message ?? "stream error";
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep: number;
+      // SSE events are separated by a blank line; each carries one `data:` field.
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const data = frame.replace(/^data: ?/, "");
+        handle(data);
+      }
+    }
+    if (errorMessage) throw new ApiError(`turn stream failed: ${errorMessage}`, 502);
+    if (!final) throw new ApiError("turn stream ended with no result", 502);
+    return final;
   }
 
   async listDocuments(sort: SortKey): Promise<DocumentMeta[]> {

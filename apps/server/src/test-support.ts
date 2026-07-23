@@ -134,6 +134,22 @@ export class FakeLlm implements LlmProvider {
     if (!next) throw new Error("FakeLlm has no more canned results.");
     return next;
   }
+
+  async completeStreaming(
+    req: LlmRequest,
+    onTextDelta: (delta: string) => void,
+  ): Promise<LlmResult> {
+    const result = await this.complete(req);
+    const json = JSON.stringify({
+      ...(result.chatMessage !== undefined ? { chatMessage: result.chatMessage } : {}),
+      actions: result.actions,
+    });
+    // Emit in two chunks so the streaming/relay path is genuinely exercised.
+    const mid = Math.ceil(json.length / 2);
+    onTextDelta(json.slice(0, mid));
+    onTextDelta(json.slice(mid));
+    return result;
+  }
 }
 
 /** Build an LlmResult envelope with sensible usage defaults. */

@@ -13,6 +13,7 @@ import type {
   PersistUndo,
   ResearchResult,
   TurnRequest,
+  TurnStreamCallbacks,
 } from "./client";
 
 // In-memory API for local dev, demos, and tests. No network, no spend. Turn
@@ -78,6 +79,22 @@ export class MockApiClient implements ApiClient {
     this.turnRequests.push(req);
     if (this.turnResponder) return this.turnResponder(req);
     return this.turnQueue.shift() ?? emptyResult;
+  }
+
+  async turnStreaming(
+    req: TurnRequest,
+    cb: TurnStreamCallbacks,
+  ): Promise<LlmResult> {
+    const result = await this.turn(req);
+    // Deliver the message live (in two chunks), then each action, so the streaming
+    // apply path is genuinely exercised without a network.
+    if (result.chatMessage) {
+      const mid = Math.ceil(result.chatMessage.length / 2);
+      cb.onChat(result.chatMessage.slice(0, mid));
+      cb.onChat(result.chatMessage);
+    }
+    for (const action of result.actions) cb.onAction(action);
+    return result;
   }
 
   async listDocuments(sort: SortKey): Promise<DocumentMeta[]> {

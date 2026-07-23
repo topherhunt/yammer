@@ -1,7 +1,7 @@
 - [x] Create a passable icon
 - [x] Set up Google Cloud SSO
+- [ ] (WIP) Support streaming LLM responses so they're applied faster, reducing perceived wait time
 - [ ] Rename folder to yammer
 - [ ] Test if the 1500ms grace period now feels like the right balance (respectful yet responsive)
 - [ ] Test that asking the LLM to do research will actually cause it to follow up and act on its findings rather than just spitting them out and doing nothing further.
-- [ ] Support streaming LLM responses so they're applied faster, reducing perceived wait time
 - [ ] Also double check that we are caching properly, so old chat history only accumulates at cached prices, not at full quadratic price.

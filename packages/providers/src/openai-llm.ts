@@ -176,7 +176,53 @@ export function createLlmProvider(config: LlmProviderConfig): LlmProvider {
       });
       return parseOpenAiResponse(response);
     },
+
+    async completeStreaming(
+      req: LlmRequest,
+      onTextDelta: (delta: string) => void,
+    ): Promise<LlmResult> {
+      // Same request as complete(), but streamed: forward each output-text delta as
+      // it arrives, then parse the final response for actions/usage/raw.
+      const stream = await client.responses.create({
+        model: req.model || config.model,
+        instructions: req.system,
+        input: req.messages.map((m) => ({ role: m.role, content: m.content })),
+        reasoning: { effort: reasoningEffort },
+        ...(req.maxTokens !== undefined ? { max_output_tokens: req.maxTokens } : {}),
+        text: {
+          format: {
+            type: "json_schema",
+            name: "yammer_turn",
+            schema: yammerTurnJsonSchema,
+            strict: false,
+          },
+        },
+        stream: true,
+      });
+
+      let finalResponse: unknown;
+      for await (const event of stream as AsyncIterable<StreamEvent>) {
+        if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+          onTextDelta(event.delta);
+        } else if (event.type === "response.completed" && event.response) {
+          finalResponse = event.response;
+        }
+      }
+      if (finalResponse === undefined) {
+        throw new Error("OpenAI stream ended without a completed response");
+      }
+      return parseOpenAiResponse(
+        finalResponse as Parameters<typeof parseOpenAiResponse>[0],
+      );
+    },
   };
+}
+
+/** The subset of Responses streaming events we consume. */
+interface StreamEvent {
+  type: string;
+  delta?: unknown;
+  response?: unknown;
 }
 
 /**
@@ -200,5 +246,21 @@ export class MockLlmProvider implements LlmProvider {
     }
     this.index++;
     return next;
+  }
+
+  /** Streams the canned result's JSON in chunks so the streaming path is exercised
+   * with no network. */
+  async completeStreaming(
+    req: LlmRequest,
+    onTextDelta: (delta: string) => void,
+  ): Promise<LlmResult> {
+    const result = await this.complete(req);
+    const json = JSON.stringify({
+      ...(result.chatMessage !== undefined ? { chatMessage: result.chatMessage } : {}),
+      actions: result.actions,
+    });
+    const step = Math.max(1, Math.ceil(json.length / 4));
+    for (let i = 0; i < json.length; i += step) onTextDelta(json.slice(i, i + step));
+    return result;
   }
 }
