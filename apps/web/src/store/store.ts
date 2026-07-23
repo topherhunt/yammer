@@ -144,6 +144,9 @@ export interface AppStore {
   /** Live text sync from direct keyboard editing (no version -- a dev
    * convenience; AI/voice edits are the ones that append to history). */
   setDocumentText: (text: string) => void;
+  /** Move the insertion cursor from a user click/selection in the editor. Clamped to
+   * the current text. This is where the next dictated content goes by default. */
+  setCursor: (offset: number) => void;
   /** Resolves when the serial version-persist queue has drained (or paused on a
    * surfaced error). Primarily a test hook -- persistence is fire-and-await in
    * the background, and this lets callers wait for it deterministically. */
@@ -445,6 +448,7 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
           history: payload.history,
           undoStack: payload.history.map((v) => v.id),
           undoCursor: payload.history.length - 1,
+          cursor: payload.document.text.length, // start at the end of the loaded doc
           openDialog: null,
         },
         usages: [],
@@ -988,6 +992,16 @@ export function createAppStore(deps: StoreDeps): StoreApi<AppStore> {
             ? { app: { ...s.app, activeDocument: { ...s.app.activeDocument, text } } }
             : s,
         );
+      },
+
+      setCursor(offset) {
+        set((s) => {
+          const doc = s.app.activeDocument;
+          if (!doc) return s;
+          const clamped = Math.max(0, Math.min(offset, doc.text.length));
+          if (clamped === s.app.cursor) return s;
+          return { app: { ...s.app, cursor: clamped } };
+        });
       },
     };
   });

@@ -29,6 +29,8 @@ export const insertTextAction = z.object({
   position: z.union([
     z.literal("start"),
     z.literal("end"),
+    // The current cursor (insertion point). Use this for dictated continuations.
+    z.literal("cursor"),
     // `occurrence` (1-based) disambiguates when the anchor repeats; without it,
     // a repeated anchor throws rather than silently inserting at the first match.
     z.object({
@@ -37,6 +39,19 @@ export const insertTextAction = z.object({
     }),
   ]),
   text: z.string().min(1),
+});
+
+/** Move the insertion cursor (the blue line) without editing text. */
+export const placeCursorAction = z.object({
+  type: z.literal("place_cursor"),
+  position: z.union([
+    z.literal("start"),
+    z.literal("end"),
+    z.object({
+      afterFind: z.string().min(1),
+      occurrence: z.number().int().positive().optional(),
+    }),
+  ]),
 });
 
 export const restoreVersionAction = z.object({
@@ -175,6 +190,7 @@ export const clarifyAction = z.object({
 export const actionSchema = z.discriminatedUnion("type", [
   editTextAction,
   insertTextAction,
+  placeCursorAction,
   restoreVersionAction,
   restoreFragmentAction,
   readVersionAction,

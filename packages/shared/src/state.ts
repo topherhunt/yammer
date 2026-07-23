@@ -167,6 +167,11 @@ export interface AppState {
   chatScroll: ScrollState;
 
   chat: ChatEntry[];
+  /** The insertion point: a character offset into activeDocument.text where dictated
+   * content goes BY DEFAULT and where the blue cursor is drawn. It moves to the end
+   * of each edit, is set by the place_cursor action or a user click in the editor,
+   * and is always clamped to [0, text.length]. 0 when no document is open. */
+  cursor: number;
   /** An older version the AI asked to read (via read_version), surfaced into
    * context so it can patch a fragment back in. Cleared on the next edit. */
   readVersion: { seq: number; text: string } | null;
@@ -249,6 +254,7 @@ export function initialState(overrides: Partial<AppState> = {}): AppState {
     documentScroll: { ...emptyScroll },
     chatScroll: { ...emptyScroll },
     chat: [],
+    cursor: 0,
     readVersion: null,
     chatSummary: "",
     chatSummarizedCount: 0,

@@ -11,6 +11,9 @@ export interface SituationalContext {
     lineCount: number;
     /** Full current text with 1-based line-number prefixes for reliable addressing. */
     numberedText: string;
+    /** The insertion cursor (the blue line): the line it's on plus a short window of
+     * text immediately before/after it. Dictated content goes HERE by default. */
+    cursor: { line: number; before: string; after: string };
   } | null;
   /** What is currently on screen in the document, for scroll-aware commands. */
   visible: { firstLine: number; lastLine: number } | null;
@@ -42,6 +45,11 @@ export const situationalContextSchema = z.object({
       name: z.string(),
       lineCount: z.number(),
       numberedText: z.string(),
+      cursor: z.object({
+        line: z.number(),
+        before: z.string(),
+        after: z.string(),
+      }),
     })
     .nullable(),
   visible: z

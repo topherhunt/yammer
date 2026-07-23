@@ -19,7 +19,62 @@ export interface FindReplace {
 export type InsertPosition =
   | "start"
   | "end"
+  | "cursor"
   | { afterFind: string; occurrence?: number };
+
+/** Resolve an InsertPosition to a character offset. `cursor` is the current
+ * insertion point (clamped to the text); the anchored form throws (missing /
+ * ambiguous) exactly like applyInsert. */
+export function insertOffset(
+  text: string,
+  position: InsertPosition,
+  cursor: number,
+): number {
+  if (position === "start") return 0;
+  if (position === "end") return text.length;
+  if (position === "cursor") return Math.max(0, Math.min(cursor, text.length));
+
+  const { afterFind, occurrence } = position;
+  const indices = allIndices(text, afterFind);
+  if (indices.length === 0) {
+    throw new EditError(`Insert anchor not found: ${JSON.stringify(afterFind)}`);
+  }
+  let at: number;
+  if (occurrence == null) {
+    if (indices.length > 1) {
+      throw new EditError(
+        `Ambiguous insert anchor: ${JSON.stringify(afterFind)} appears ${indices.length} times; specify an occurrence.`,
+      );
+    }
+    at = indices[0]!;
+  } else {
+    if (occurrence < 1 || occurrence > indices.length) {
+      throw new EditError(
+        `Occurrence ${occurrence} out of range: ${JSON.stringify(afterFind)} appears ${indices.length} time(s).`,
+      );
+    }
+    at = indices[occurrence - 1]!;
+  }
+  return at + afterFind.length;
+}
+
+/** Where the cursor should sit after a text change: at the END of the changed
+ * region (common-prefix + inserted content). For a pure deletion it lands where the
+ * text was removed. Used to keep the insertion cursor with the latest edit. */
+export function cursorAfterChange(oldText: string, newText: string): number {
+  let p = 0;
+  const max = Math.min(oldText.length, newText.length);
+  while (p < max && oldText[p] === newText[p]) p++;
+  // Common suffix length, not overlapping the common prefix.
+  let s = 0;
+  while (
+    s < max - p &&
+    oldText[oldText.length - 1 - s] === newText[newText.length - 1 - s]
+  ) {
+    s++;
+  }
+  return newText.length - s;
+}
 
 /** Apply a sequence of find/replace edits left-to-right. Throws on any miss. */
 export function applyEdits(text: string, edits: FindReplace[]): string {
@@ -79,32 +134,6 @@ export function applyInsert(
   position: InsertPosition,
   insert: string,
 ): string {
-  if (position === "start") return insert + text;
-  if (position === "end") return text + insert;
-
-  const { afterFind, occurrence } = position;
-  const indices = allIndices(text, afterFind);
-  if (indices.length === 0) {
-    throw new EditError(`Insert anchor not found: ${JSON.stringify(afterFind)}`);
-  }
-
-  let at: number;
-  if (occurrence == null) {
-    if (indices.length > 1) {
-      throw new EditError(
-        `Ambiguous insert anchor: ${JSON.stringify(afterFind)} appears ${indices.length} times; specify an occurrence.`,
-      );
-    }
-    at = indices[0]!;
-  } else {
-    if (occurrence < 1 || occurrence > indices.length) {
-      throw new EditError(
-        `Occurrence ${occurrence} out of range: ${JSON.stringify(afterFind)} appears ${indices.length} time(s).`,
-      );
-    }
-    at = indices[occurrence - 1]!;
-  }
-
-  const cut = at + afterFind.length;
-  return text.slice(0, cut) + insert + text.slice(cut);
+  const at = insertOffset(text, position, 0);
+  return text.slice(0, at) + insert + text.slice(at);
 }

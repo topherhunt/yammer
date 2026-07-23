@@ -7,7 +7,12 @@ import type {
   LlmResponse,
   Version,
 } from "@yammer/shared";
-import { applyEdits, applyInsert, EditError } from "./edit-engine";
+import {
+  applyEdits,
+  cursorAfterChange,
+  EditError,
+  insertOffset,
+} from "./edit-engine";
 import {
   createVersion,
   currentVersion,
@@ -113,6 +118,9 @@ function appendVersion(
     history: [...state.history, version],
     undoStack,
     undoCursor,
+    // Move the insertion cursor to the end of whatever just changed, so dictated
+    // continuations keep flowing from the latest edit rather than snapping elsewhere.
+    cursor: cursorAfterChange(state.activeDocument!.text, version.fullText),
     // A committed edit consumes any version the AI had read for patching.
     readVersion: null,
     chat: [...state.chat, chatEntryFor(version, ctx)],
@@ -214,9 +222,13 @@ export function applyAction(
       if (!state.activeDocument) {
         return errorResult(state, ctx, "No document is open to insert into.");
       }
+      const text = state.activeDocument.text;
       let newText: string;
       try {
-        newText = applyInsert(state.activeDocument.text, action.position, action.text);
+        // Resolve the offset ourselves (so 'cursor' works + we can place the cursor
+        // right after the insert), then splice the text in.
+        const at = insertOffset(text, action.position, state.cursor);
+        newText = text.slice(0, at) + action.text + text.slice(at);
       } catch (err) {
         if (err instanceof EditError) return errorResult(state, ctx, err.message);
         throw err;
@@ -226,6 +238,22 @@ export function applyAction(
         kind: "edit",
         summary: `Inserted "${truncate(action.text)}"`,
       });
+    }
+
+    case "place_cursor": {
+      if (!state.activeDocument) {
+        return errorResult(state, ctx, "No document is open to place the cursor in.");
+      }
+      let at: number;
+      try {
+        // afterFind resolves to just after the anchor; start/end to the edges.
+        at = insertOffset(state.activeDocument.text, action.position, state.cursor);
+      } catch (err) {
+        if (err instanceof EditError) return errorResult(state, ctx, err.message);
+        throw err;
+      }
+      // No version -- moving the cursor isn't an edit; just reposition it.
+      return { state: { ...state, cursor: at }, effects: [] };
     }
 
     case "restore_version": {
@@ -366,6 +394,7 @@ export function applyAction(
         history: [version],
         undoStack: [version.id],
         undoCursor: 0,
+        cursor: 0, // empty new doc -- cursor at the start
       };
       // A visible divider in the (retained) transcript so the user always sees the
       // boundary; the same entry anchors the LLM context to this document.

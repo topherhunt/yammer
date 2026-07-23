@@ -81,6 +81,19 @@ function dialogContents(state: AppState): string {
   }
 }
 
+/** The cursor's line + a short window of text on either side of it, so the model
+ * can see exactly where dictated content will land. */
+function cursorContext(
+  text: string,
+  cursor: number,
+): { line: number; before: string; after: string } {
+  const at = Math.max(0, Math.min(cursor, text.length));
+  const line = text.slice(0, at).split("\n").length; // 1-based
+  const before = text.slice(Math.max(0, at - 40), at);
+  const after = text.slice(at, at + 40);
+  return { line, before, after };
+}
+
 export function assembleContext(state: AppState): SituationalContext {
   const doc = state.activeDocument;
   return {
@@ -89,6 +102,7 @@ export function assembleContext(state: AppState): SituationalContext {
           name: doc.name,
           lineCount: doc.text.length ? doc.text.split("\n").length : 0,
           numberedText: numberLines(doc.text),
+          cursor: cursorContext(doc.text, state.cursor),
         }
       : null,
     visible: doc

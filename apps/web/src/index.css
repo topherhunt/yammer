@@ -119,6 +119,34 @@
   }
 }
 
+/* The persistent insertion cursor: a blue, gently-blinking vertical line marking
+   where dictated content goes by default (visible even when unfocused). */
+.qa-doc-cursor {
+  display: inline-block;
+  width: 0;
+  height: 1.15em;
+  margin: 0 -1px;
+  vertical-align: text-bottom;
+  border-left: 2px solid #3b82f6;
+  animation: qa-doc-cursor-blink 1.15s ease-in-out infinite;
+}
+
+@keyframes qa-doc-cursor-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qa-doc-cursor {
+    animation: none;
+  }
+}
+
 /* CodeMirror fills its pane and reads as a plain writing surface. */
 .qa-document-editor .cm-editor {
   height: 100%;

@@ -12,6 +12,42 @@ function lastChat(chat: ChatEntry[]): ChatEntry {
   return chat[chat.length - 1]!;
 }
 
+describe("cursor", () => {
+  it("moves the cursor to the end of the changed text after an edit", () => {
+    const { state } = applyAction(
+      docState("the cat sat", { cursor: 0 }),
+      { type: "edit_text", edits: [{ find: "cat", replace: "hippopotamus" }] },
+      makeCtx("ai"),
+    );
+    expect(state.activeDocument?.text).toBe("the hippopotamus sat");
+    // Cursor lands right after the replacement, so dictation continues there.
+    expect(state.cursor).toBe("the hippopotamus".length);
+  });
+
+  it("inserts at the cursor with position 'cursor' and advances the cursor past it", () => {
+    const { state } = applyAction(
+      docState("ab", { cursor: 1 }),
+      { type: "insert_text", position: "cursor", text: "X" },
+      makeCtx("ai"),
+    );
+    expect(state.activeDocument?.text).toBe("aXb");
+    expect(state.cursor).toBe(2); // just after the inserted X
+  });
+
+  it("place_cursor moves the cursor after an anchor WITHOUT editing or versioning", () => {
+    const before = docState("hello world", { cursor: 0 });
+    const { state, effects } = applyAction(
+      before,
+      { type: "place_cursor", position: { afterFind: "hello" } },
+      makeCtx("ai"),
+    );
+    expect(state.activeDocument?.text).toBe("hello world"); // unchanged
+    expect(state.cursor).toBe(5); // just after "hello"
+    expect(state.history).toHaveLength(before.history.length); // no new version
+    expect(effects).toEqual([]);
+  });
+});
+
 describe("edit_text", () => {
   it("applies the edit, appends a version, and updates the active document", () => {
     const { state, effects } = applyAction(

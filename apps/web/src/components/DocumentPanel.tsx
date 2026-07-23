@@ -4,6 +4,7 @@ import { Annotation, EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { computeChange } from "../editor/changes";
 import { addHighlight, clearHighlights, editHighlights } from "../editor/highlight-extension";
+import { cursorField, setCursorPos } from "../editor/cursor-extension";
 import { useAppStore, useStoreApi } from "../store/context";
 
 // The document surface: a CodeMirror 6 plain-text/markdown editor. Reducer edits
@@ -35,6 +36,7 @@ function reportScroll(view: EditorView, setScroll: (s: {
 export function DocumentPanel() {
   const api = useStoreApi();
   const doc = useAppStore((s) => s.app.activeDocument);
+  const cursor = useAppStore((s) => s.app.cursor);
   const scrollCommand = useAppStore((s) => s.scrollCommand);
 
   const hostRef = useRef<HTMLDivElement>(null);
@@ -53,12 +55,21 @@ export function DocumentPanel() {
           keymap.of([...defaultKeymap, ...historyKeymap]),
           EditorView.lineWrapping,
           editHighlights(),
+          cursorField,
           EditorView.updateListener.of((u) => {
             if (
               u.docChanged &&
               !u.transactions.some((t) => t.annotation(External))
             ) {
               api.getState().setDocumentText(u.state.doc.toString());
+            }
+            // A user click/selection (not our own external cursor sync) moves the
+            // insertion point -- report it so dictation continues from there.
+            if (
+              u.selectionSet &&
+              !u.transactions.some((t) => t.annotation(External))
+            ) {
+              api.getState().setCursor(u.state.selection.main.head);
             }
             if (u.docChanged || u.viewportChanged || u.geometryChanged) {
               reportScroll(u.view, api.getState().setDocumentScroll);
@@ -113,6 +124,18 @@ export function DocumentPanel() {
       }),
     });
   }, [doc]);
+
+  // Reflect the store's cursor (moved by AI edits / place_cursor / a load) as the
+  // blue insertion line. Depends on text too, so it re-syncs after any edit. Marked
+  // External so it never echoes back through the selection listener.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: setCursorPos.of(cursor),
+      annotations: External.of(true),
+    });
+  }, [cursor, doc?.text]);
 
   // Voice-driven scroll commands.
   useEffect(() => {

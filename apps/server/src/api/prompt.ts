@@ -18,9 +18,20 @@ export function buildSystemPrompt(): string {
     "Editing philosophy: maximally preserve the speaker's exact voice and wording. Only reword when explicitly asked.",
     "Prefer ONE action per coherent change. In particular, express a MOVE (remove text from one place, add it to another) as a single edit_text find/replace where possible, not a separate delete + insert -- actions apply incrementally, so a single action keeps a move atomic.",
     "",
+    "DICTATION CONTINUITY -- this is where you most often go wrong; follow it exactly:",
+    "- CONTINUE WHERE THE USER IS WORKING. When they dictate more prose without naming a location, insert it AT THE CURSOR (insert_text { position: \"cursor\" }) -- the cursor sits at the end of your last edit, i.e. in the paragraph they are currently in (add a single leading space, not a line break). Do NOT start a new paragraph and do NOT jump to the end of the document.",
+    "- Start a NEW PARAGRAPH (a blank line) ONLY when the user explicitly asks ('new paragraph', 'next paragraph', 'start a new one'). Never infer a paragraph break from a pause, a new sentence, or a topic shift.",
+    "- STICKY INTENT: once the user corrects your placement (e.g. 'put that in the same paragraph', 'don't make a new paragraph'), KEEP honoring that for every following dictation until they say otherwise. Do not revert to new-paragraph behavior on the next sentence.",
+    "- STICKY LOCATION: if the user directs you to edit a SPECIFIC earlier spot (e.g. 'at the end of the first paragraph'), keep working THERE for subsequent related dictation -- do not snap back to the document end.",
+    "",
+    "APPLY CORRECTIONS -- when the user points out a mistake or asks for a change, actually PERFORM the edit in this turn. Merely replying 'Got it, I'll do X' with no action is a failure that feels like you're ignoring them. If (and only if) their intent is genuinely ambiguous, ask a brief clarify question instead -- never just acknowledge without acting.",
+    "",
+    "PROPER NOUNS FROM SPEECH -- dictation mis-hears names. If a dictated name closely matches one ALREADY in the document or the conversation (e.g. you hear 'Merrick' but the character is 'Marek', or 'Ringo' vs 'Bingo'), treat it as the SAME entity and use the EXISTING spelling. Only treat it as a new distinct character if the context clearly establishes one.",
+    "",
     "You never mutate the document directly. You return a JSON object { chatMessage?, actions[] } where each action is one of:",
     "- edit_text { edits: [{ find, replace, occurrence? }] } -- anchored find/replace against the current text.",
-    "- insert_text { position: 'start' | 'end' | { afterFind, occurrence? }, text } -- YOU must include the surrounding whitespace. When adding a NEW paragraph after existing text, prefix `text` with a blank line (\"\\n\\n\") so it doesn't butt against the previous line; the document text is inserted verbatim, exactly as you provide it.",
+    "- insert_text { position: 'start' | 'end' | 'cursor' | { afterFind, occurrence? }, text } -- 'cursor' inserts at the current cursor (use this for dictated continuations). YOU must include the surrounding whitespace. When adding a NEW paragraph after existing text, prefix `text` with a blank line (\"\\n\\n\") so it doesn't butt against the previous line; the document text is inserted verbatim, exactly as you provide it.",
+    "- place_cursor { position: 'start' | 'end' | { afterFind, occurrence? } } -- move the blue insertion cursor without editing (e.g. 'move the cursor to the end of the first paragraph'). afterFind places it just after the matched text.",
     "- restore_version { seq } / restore_fragment { seq, find, replace } -- seq is the version number (v0, v1, ...) shown in the edit history; the full version list is provided in context so you can pick the right one.",
     "- read_version { seq } -- load an older version's FULL TEXT into context. To restore just part of an old version (e.g. one paragraph), you usually need its exact wording, which you cannot see: first read_version { seq }, then on the FOLLOWING turn issue restore_fragment (or edit_text) using the exact text now shown under \"Opened version\".",
     "- undo { count? } / redo { count? }",
@@ -47,9 +58,11 @@ export function renderUserMessage(
   const parts: string[] = [];
 
   if (context.document) {
+    const cur = context.document.cursor;
     parts.push(
       `# Current document: ${context.document.name} (${context.document.lineCount} lines)`,
       context.document.numberedText,
+      `# Cursor (the blue line -- dictated content goes HERE by default): line ${cur.line}, between ${JSON.stringify(cur.before)} and ${JSON.stringify(cur.after)}. To insert at it use insert_text { position: "cursor" }. To MOVE it (e.g. "put the cursor at the end of the first paragraph") use place_cursor.`,
     );
   } else {
     parts.push(
