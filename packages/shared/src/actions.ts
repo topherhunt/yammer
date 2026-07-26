@@ -61,17 +61,27 @@ export const placeCursorAction = z.object({
   ]),
 });
 
+// A version seq -- the number shown in the edit history (v0, v1, ...). The model
+// addresses versions by seq (it never sees the opaque version IDs) and usually
+// returns a bare number, but sometimes slips and sends a string like "5" or "v5".
+// Coerce those to a number so a formatting slip doesn't sink an otherwise-valid
+// restore (previously threw "seq: Expected number, received string").
+const seqSchema = z.preprocess((v) => {
+  if (typeof v === "string") {
+    const n = Number(v.replace(/^v/i, "").trim());
+    return Number.isNaN(n) ? v : n;
+  }
+  return v;
+}, z.number().int().nonnegative());
+
 export const restoreVersionAction = z.object({
   type: z.literal("restore_version"),
-  // The version's seq -- the number shown in the edit history (v0, v1, ...). The
-  // model can see seqs in context but never the opaque version IDs, so it
-  // addresses versions by seq and the reducer resolves it to the version.
-  seq: z.number().int().nonnegative(),
+  seq: seqSchema,
 });
 
 export const restoreFragmentAction = z.object({
   type: z.literal("restore_fragment"),
-  seq: z.number().int().nonnegative(), // version seq (see restore_version)
+  seq: seqSchema, // version seq (see restore_version)
   // `find` locates the fragment in the CURRENT text; `replace` is the text
   // pulled from the older version. Applied like an edit, tagged as a restore.
   find: z.string().min(1),
@@ -83,7 +93,7 @@ export const restoreFragmentAction = z.object({
 // following turn issues restore_fragment / edit_text with the exact old text.
 export const readVersionAction = z.object({
   type: z.literal("read_version"),
-  seq: z.number().int().nonnegative(),
+  seq: seqSchema,
 });
 
 // Relative navigation along the undo timeline. `count` supports "undo the last
@@ -188,11 +198,9 @@ export const downloadDiagnosticsAction = z.object({
   type: z.literal("download_diagnostics"),
 });
 
-export const clarifyAction = z.object({
-  type: z.literal("clarify"),
-  // Ask rather than guess on ambiguous or destructive requests.
-  question: z.string().min(1),
-});
+// NOTE: there is no `clarify` action. To ask a question instead of guessing, the
+// model uses `chatMessage` with no mutating actions -- a single output channel for
+// user-facing text, so one turn can never produce two near-duplicate bubbles.
 
 export const actionSchema = z.discriminatedUnion("type", [
   editTextAction,
@@ -217,7 +225,6 @@ export const actionSchema = z.discriminatedUnion("type", [
   updateSettingsAction,
   researchAction,
   downloadDiagnosticsAction,
-  clarifyAction,
 ]);
 
 export type Action = z.infer<typeof actionSchema>;

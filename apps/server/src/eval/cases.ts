@@ -79,7 +79,7 @@ const has = (haystack: string, needle: string): boolean =>
   haystack.toLowerCase().includes(needle.toLowerCase());
 
 /** Actions that mutate the document text or its history -- exactly what the model
- * must NOT do when it should be asking a clarifying question instead of guessing. */
+ * must NOT do when it should be asking a question (via chatMessage) instead of guessing. */
 const MUTATING_ACTIONS: ReadonlySet<ActionType> = new Set<ActionType>([
   "edit_text",
   "insert_text",
@@ -89,7 +89,7 @@ const MUTATING_ACTIONS: ReadonlySet<ActionType> = new Set<ActionType>([
   "redo",
 ]);
 
-/** Fail if any document-mutating action was returned (used by the clarify case). */
+/** Fail if any document-mutating action was returned (used by the ask-a-question cases). */
 function ensureNoMutation(actions: Action[]): void {
   const mutating = actions.filter((a) => MUTATING_ACTIONS.has(a.type));
   ensure(
@@ -280,13 +280,15 @@ export const cases: EvalCase[] = [
     },
   },
   {
-    name: "an ambiguous request yields a clarify AND no mutating action (no guessed edit)",
+    name: "an ambiguous request asks a question (chatMessage) AND makes no guessed edit",
     docText: "We should consider the proposal.\nIt has some merit but also risks.",
     transcript: "Fix it.",
-    assert: ({ actions }) => {
-      const clarify = pick(actions, "clarify");
-      ensure(clarify.question.trim().length > 0, "clarify must ask a real question");
-      // Promise in the title: clarifying INSTEAD OF guessing means the model must not
+    assert: ({ chatMessage, actions }) => {
+      ensure(
+        !!chatMessage && chatMessage.trim().length > 0,
+        "an ambiguous request must ask a question in chatMessage",
+      );
+      // Promise in the title: asking INSTEAD OF guessing means the model must not
       // also fire off a speculative edit/insert/restore/undo on the ambiguous request.
       ensureNoMutation(actions);
     },
@@ -546,14 +548,16 @@ export const cases: EvalCase[] = [
     },
   },
   {
-    name: "an ambiguous edit target yields a clarify and NO guessed edit_text",
+    name: "an ambiguous edit target asks which (chatMessage) and makes NO guessed edit_text",
     docText:
       "The kickoff meeting is on Monday, March 3rd.\nThe final review is on Friday, March 14th.",
     transcript: "Change the date.",
-    assert: ({ actions }) => {
+    assert: ({ chatMessage, actions }) => {
       // Two candidate dates -> the model must ask which, not silently pick one.
-      const clarify = pick(actions, "clarify");
-      ensure(clarify.question.trim().length > 0, "clarify must ask a real question");
+      ensure(
+        !!chatMessage && chatMessage.trim().length > 0,
+        "an ambiguous date target must ask which in chatMessage",
+      );
       ensureAbsent(
         actions,
         "edit_text",

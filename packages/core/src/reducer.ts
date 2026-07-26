@@ -10,6 +10,7 @@ import type {
 import {
   applyEdits,
   cursorAfterChange,
+  describeChange,
   EditError,
   insertOffset,
 } from "./edit-engine";
@@ -249,10 +250,15 @@ export function applyAction(
       if (head && head.fullText === state.activeDocument.text) {
         return { state, effects: [] };
       }
+      // Describe WHAT changed so the model can later act on it ("undo the word I
+      // italicized") -- an opaque "Edited by keyboard" left it guessing.
+      const what = head
+        ? describeChange(head.fullText, state.activeDocument.text)
+        : "typed the document";
       return commitVersion(state, ctx, {
         newText: state.activeDocument.text,
         kind: "edit",
-        summary: "Edited by keyboard",
+        summary: `Edited by keyboard: ${what}`,
       });
     }
 
@@ -561,15 +567,6 @@ export function applyAction(
       };
     }
 
-    case "clarify": {
-      const next = withChat(state, {
-        kind: "ai_message",
-        id: ctx.newId(),
-        at: ctx.now(),
-        text: action.question,
-      });
-      return { state: next, effects: [] };
-    }
   }
 }
 

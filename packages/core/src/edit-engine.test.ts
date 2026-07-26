@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { applyEdits, applyInsert, EditError } from "./edit-engine";
+import { applyEdits, applyInsert, describeChange, EditError } from "./edit-engine";
+
+describe("describeChange", () => {
+  it("describes an insertion", () => {
+    expect(describeChange("hello", "hello world")).toBe('inserted "world"');
+  });
+
+  it("describes a deletion", () => {
+    expect(describeChange("hello world", "hello")).toBe('deleted "world"');
+  });
+
+  it("describes a replacement -- e.g. italicizing a word", () => {
+    expect(describeChange("frost on the ice today", "frost on the *ice* today")).toBe(
+      'changed "ice" to "*ice*"',
+    );
+  });
+
+  it("returns 'no change' for identical text", () => {
+    expect(describeChange("same", "same")).toBe("no change");
+  });
+});
 
 describe("applyEdits", () => {
   it("replaces a unique match", () => {

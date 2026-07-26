@@ -76,6 +76,34 @@ export function cursorAfterChange(oldText: string, newText: string): number {
   return newText.length - s;
 }
 
+/** A short, human/AI-readable description of the single contiguous change between two
+ * texts (common-prefix + common-suffix diff). Used to give keyboard edits an
+ * INFORMATIVE history summary -- so the model can see WHAT the user changed (e.g. that
+ * they italicized "ice"), not just an opaque "Edited by keyboard". Reports the removed
+ * and/or added slice; both empty (identical texts) returns "no change". */
+export function describeChange(oldText: string, newText: string): string {
+  let p = 0;
+  const max = Math.min(oldText.length, newText.length);
+  while (p < max && oldText[p] === newText[p]) p++;
+  let s = 0;
+  while (
+    s < max - p &&
+    oldText[oldText.length - 1 - s] === newText[newText.length - 1 - s]
+  ) {
+    s++;
+  }
+  const removed = oldText.slice(p, oldText.length - s);
+  const added = newText.slice(p, newText.length - s);
+  const clip = (t: string): string => {
+    const one = t.replace(/\s+/g, " ").trim();
+    return one.length > 40 ? one.slice(0, 39) + "…" : one;
+  };
+  if (!removed && !added) return "no change";
+  if (removed && added) return `changed "${clip(removed)}" to "${clip(added)}"`;
+  if (added) return `inserted "${clip(added)}"`;
+  return `deleted "${clip(removed)}"`;
+}
+
 /** Apply a sequence of find/replace edits left-to-right. Throws on any miss. */
 export function applyEdits(text: string, edits: FindReplace[]): string {
   let result = text;

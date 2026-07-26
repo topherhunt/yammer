@@ -28,6 +28,9 @@ describe("commit_keyboard_edit", () => {
     expect(state.history).toHaveLength(s.history.length + 1);
     expect(state.history.at(-1)?.fullText).toBe("hello world");
     expect(state.history.at(-1)?.author).toBe("user");
+    // The summary DESCRIBES what changed, so the model can later act on it ("undo my
+    // edit") instead of guessing from an opaque "Edited by keyboard".
+    expect(state.history.at(-1)?.summary).toContain("world");
     expect(effectTypes(effects)).toEqual(["persist_version"]);
   });
 
@@ -353,18 +356,7 @@ describe("scroll", () => {
   });
 });
 
-describe("clarify and research", () => {
-  it("clarify posts the question as an assistant message with no effects", () => {
-    const { state, effects } = applyAction(
-      docState("x"),
-      { type: "clarify", question: "Which paragraph do you mean?" },
-      makeCtx("ai"),
-    );
-    const entry = lastChat(state.chat);
-    expect(entry.kind).toBe("ai_message");
-    expect(effects).toHaveLength(0);
-  });
-
+describe("research", () => {
   it("research posts a thinking status and requests the research effect", () => {
     const { state, effects } = applyAction(
       docState("x"),

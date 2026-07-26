@@ -28,6 +28,25 @@ describe("parseLlmResponse", () => {
     }
   });
 
+  it("coerces a string seq (e.g. \"v5\" or \"5\") on restore_version to a number", () => {
+    // The model sometimes returns seq as a string; a formatting slip must not sink an
+    // otherwise-valid restore (it previously threw "seq: Expected number, received string").
+    for (const [input, expected] of [
+      ["v5", 5],
+      ["5", 5],
+      [3, 3],
+    ] as const) {
+      const result = parseLlmResponse({
+        actions: [{ type: "restore_version", seq: input }],
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const action = result.response.actions[0]!;
+        if (action.type === "restore_version") expect(action.seq).toBe(expected);
+      }
+    }
+  });
+
   it("rejects an unknown action type with a clear error", () => {
     const result = parseLlmResponse({
       actions: [{ type: "delete_everything" }],

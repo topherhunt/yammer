@@ -10,20 +10,63 @@ describe("spansForLine", () => {
     // "a *word* b" -- markers at 2 and 7, content "word" at 3..7.
     const spans = spansForLine("a *word* b", 100);
     expect(spans).toEqual([
-      { markFrom: 102, contentFrom: 103, contentTo: 107, markTo: 108, cls: "qa-md-italic" },
+      {
+        markFrom: 102,
+        contentFrom: 103,
+        contentTo: 107,
+        markTo: 108,
+        classes: ["qa-md-italic"],
+      },
     ]);
   });
 
   it("reads ** as bold, not two italics", () => {
     const spans = spansForLine("**loud**", 0);
     expect(spans).toEqual([
-      { markFrom: 0, contentFrom: 2, contentTo: 6, markTo: 8, cls: "qa-md-bold" },
+      { markFrom: 0, contentFrom: 2, contentTo: 6, markTo: 8, classes: ["qa-md-bold"] },
     ]);
   });
 
-  it("finds both a bold and an italic span on one line", () => {
+  it("matches single-char content like **b**", () => {
+    const spans = spansForLine("**b**", 0);
+    expect(spans).toEqual([
+      { markFrom: 0, contentFrom: 2, contentTo: 3, markTo: 5, classes: ["qa-md-bold"] },
+    ]);
+  });
+
+  it("finds sibling bold and italic spans without merging them", () => {
     const spans = spansForLine("**b** and *i*", 0);
-    expect(spans.map((s) => s.cls)).toEqual(["qa-md-bold", "qa-md-italic"]);
+    expect(spans.map((s) => s.classes)).toEqual([["qa-md-bold"], ["qa-md-italic"]]);
+  });
+
+  it("nests italic inside bold (**bold *and italic* here**)", () => {
+    const spans = spansForLine("**bold *and italic* here**", 0);
+    // Outer bold covers the whole inner content; the inner italic sits within it.
+    expect(spans[0]).toMatchObject({ markFrom: 0, classes: ["qa-md-bold"] });
+    const italic = spans.find((s) => s.classes[0] === "qa-md-italic");
+    expect(italic).toBeDefined();
+    expect("bold *and italic* here".slice(italic!.contentFrom - 2, italic!.contentTo - 2)).toBe(
+      "and italic",
+    );
+  });
+
+  it("nests bold inside italic (*italic **and bold** here*)", () => {
+    const spans = spansForLine("*italic **and bold** here*", 0);
+    expect(spans[0]).toMatchObject({ markFrom: 0, classes: ["qa-md-italic"] });
+    expect(spans.some((s) => s.classes[0] === "qa-md-bold")).toBe(true);
+  });
+
+  it("renders ***x*** as both bold and italic", () => {
+    const spans = spansForLine("***x***", 0);
+    expect(spans).toEqual([
+      {
+        markFrom: 0,
+        contentFrom: 3,
+        contentTo: 4,
+        markTo: 7,
+        classes: ["qa-md-bold", "qa-md-italic"],
+      },
+    ]);
   });
 
   it("ignores a lone asterisk and space-padded markers", () => {
