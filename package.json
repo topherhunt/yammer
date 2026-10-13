@@ -1,6 +1,7 @@
 {
   "name": "yammer",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@8.15.1",
   "engines": {

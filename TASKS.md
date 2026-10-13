@@ -1,7 +1,19 @@
 - [x] Create a passable icon
 - [x] Set up Google Cloud SSO
-- [ ] (WIP) Support streaming LLM responses so they're applied faster, reducing perceived wait time
 - [ ] Rename folder to yammer
+- [ ] Smoke-test all recent fixes to ensure they applied & nothing broke:
+  - [ ] Do some thorough smoke tests of creating and editing and jumping around documents to ensure that the streamed LLM responses are now applying correctly.
+  - [ ] Empty state: with no document open, confirm there is NO blinking insertion cursor, and a centered dark rounded welcome card shows instead of "No document" (its wording is randomly framed, so it varies run to run).
+  - [ ] Insertion cursor hard-blinks on/off (a crisp blink, not the old hazy fade).
+  - [ ] Open the menu, then click "New document" -- the menu dialog should dismiss (it already does for "Load document").
+  - [ ] Streaming AI reply fills in smoothly IN PLACE -- no stutter where the message appears, vanishes, then re-animates each time.
+  - [ ] Click the document title to rename it: it becomes a text field; Enter or click-away saves, Escape cancels. Voice rename ("rename this to X") should still work too.
+  - [ ] One turn = one AI message: ask something ambiguous (e.g. "fix it") and confirm you get a SINGLE question bubble, never two near-duplicate replies.
+  - [ ] Keyboard edits persist: type directly into a document, then refresh the page -- your typed changes survive, and the "You edited" marker appears once, in chronological order (not duplicated or out of order after a voice turn).
+  - [ ] Markdown renders live: type `*word*` and `**word**`, and try Cmd+I / Cmd+B on a selection -- the asterisks hide and the text shows italic/bold; the raw markers reappear when the cursor enters that span.
+  - [ ] Nested emphasis: `**bold *and italic* here**`, `*italic **and bold** here*`, and `***both***` all render correctly (the outer style must not break when a span is nested inside it).
+  - [ ] AI can see YOUR edits: italicize a word by keyboard (Cmd+I), then ask "undo the word I italicized" -- it should target YOUR edit, not an earlier AI edit, because the history now describes what each keyboard edit changed.
+  - [ ] Version restore/undo no longer crashes on a string seq: exercise an "undo that undo" style request and confirm there is no "seq: Expected number, received string" error.
 - [ ] Test if the 1500ms grace period now feels like the right balance (respectful yet responsive)
 - [ ] Test that asking the LLM to do research will actually cause it to follow up and act on its findings rather than just spitting them out and doing nothing further.
 - [ ] Also double check that we are caching properly, so old chat history only accumulates at cached prices, not at full quadratic price.

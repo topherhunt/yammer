@@ -1,65 +1,91 @@
 # Yammer
 
-A 100% voice-driven, AI-driven text editor -- write, edit, AI-chat, and research using only your voice. Mouse and keyboard work everywhere but are never *required*. Built for a friend with ALS.
+A voice-driven, AI-driven text editor: write, edit, AI-chat, and research using only your voice. Mouse and keyboard work everywhere but are never *required*. Built for a friend with ALS.
 
-You speak -> speech becomes text -> the text plus rich situational context goes to an LLM -> the LLM returns structured **actions** (edits, navigation, chat) -> a pure reducer applies them. Every edit is recorded in append-only history.
+> **Status:** early and under active development. It works end to end locally, but it isn't deployed or production-hardened yet.
 
-- **Full blueprint:** [`plan.md`](./plan.md) -- architecture, decisions, roadmap, and the §16 backlog (incl. the in-browser verification checklist).
-- **Working guidelines for AI agents:** [`CLAUDE.md`](./CLAUDE.md).
-- **Origin/vision:** [`vision.md`](./vision.md).
+## How it works
+
+You speak -> speech becomes text -> the text plus rich situational context goes to an LLM -> the LLM returns structured **actions** (edits, navigation, chat) -> a pure reducer applies them. Every edit is recorded in append-only history, so any version can be restored.
+
+- **Voice:** streaming speech-to-text, client-side voice activity detection, and an on-device "Yammer, wake up" wake word to resume hands-free.
+- **Editing:** dictation continues at your cursor; corrections are just the next thing you say. Recent edits fade from yellow so you can see what changed.
+- **History:** full snapshot per version; restore and undo append new versions instead of rewriting history.
+- **Research:** on request, searches the web, reads selected pages, and folds a digest into the conversation.
+- **Cost visibility:** a per-document spend meter tracks speech-to-text and inference cost.
 
 ## Stack
 
-TypeScript everywhere, pnpm monorepo. React + Vite + CodeMirror 6 (web), Hono + Drizzle + PostgreSQL (server), pure-TS domain core. LLM via OpenAI GPT-5.6 (Luna dev / Terra prod); STT via OpenAI `gpt-realtime-whisper`; research via Tavily; wake word via on-device Vosk (open-source, keyless). Auth via Google OAuth.
+TypeScript pnpm monorepo. React + Vite + CodeMirror 6 + Zustand + Tailwind (web), Hono + Drizzle + PostgreSQL (server), Google OAuth. LLM via OpenAI GPT-5.6, speech-to-text via OpenAI `gpt-realtime-whisper`, web search via Tavily, wake word via [Vosk](https://alphacephei.com/vosk/) running in the browser.
 
 ```
-packages/shared   the contract: Action/AppState types, Zod schemas, provider interfaces
-packages/core     pure domain: edit engine, reducer, history, context assembler (+ tests)
-packages/providers OpenAI + Tavily adapters (and mocks)
-apps/server        Hono API, STT WebSocket proxy, Postgres/Drizzle, auth, live-eval harness
-apps/web           React UI, CodeMirror, the voice pipeline, chat sidebar
+packages/shared     the contract: Action/AppState types, Zod schemas, provider interfaces
+packages/core       pure domain: edit engine, reducer, history, context assembler
+packages/providers  OpenAI + Tavily adapters
+apps/server         Hono API, STT WebSocket proxy, Postgres/Drizzle, auth, live-eval harness
+apps/web            React UI, CodeMirror editor, voice pipeline, chat sidebar
 ```
 
-## Develop / test
+## Getting started
+
+### Prerequisites
+
+- Node 20+ and pnpm 8
+- PostgreSQL
+- API keys for OpenAI and Tavily
+- A Google OAuth client (web application type)
+
+### Setup
 
 ```sh
 pnpm install
-pnpm test          # unified suite (node + jsdom projects), ~330 tests
-pnpm -r typecheck
+
+# Database
+createdb yammer_dev
+createdb yammer_test
+psql -d yammer_dev -f apps/server/drizzle/0000_init.sql
+
+# Environment: fill in DATABASE_URL, OPENAI_API_KEY, TAVILY_API_KEY,
+# GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET
+cp apps/server/.env.example apps/server/.env
+
+# Vosk wake-word model (~40 MB, gitignored)
+bash scripts/fetch-vosk-model.sh
 ```
 
-Public legal pages render at `/privacy-policy` and `/terms-of-service`.
+In your Google OAuth client, add `http://localhost:3141/auth/google/callback` as an authorized redirect URI.
 
-## Run it locally
-
-Prereqs (already set up on this machine): a local Postgres with a `yammer_dev` database, `apps/server/.env` filled in, and the Vosk model at `apps/web/public/models/`.
-
-From a clean checkout:
-
-1. **Database:** `createdb yammer_dev` (and `yammer_test`), then apply the schema: `psql -d yammer_dev -f apps/server/drizzle/0000_init.sql`.
-2. **Server env:** copy `apps/server/.env.example` to `apps/server/.env` and fill `DATABASE_URL`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`.
-3. **Vosk wake-word model:** `bash scripts/fetch-vosk-model.sh` (downloads ~40 MB to `apps/web/public/models/`, gitignored).
-4. **Google OAuth:** register `http://localhost:3141/auth/google/callback` as an authorized redirect URI.
-
-Then run the single dev process (Hono serves the API + STT WebSocket, and the web client via Vite middleware -- one port, one command):
+### Run
 
 ```sh
-pnpm dev   # everything on http://localhost:3141
+pnpm dev
 ```
 
-Open **http://localhost:3141**, sign in with Google, tap to start listening, and talk. (Backend-less UI demo: `VITE_MOCK=1 pnpm --filter @yammer/web dev`. Production: `pnpm build` then `NODE_ENV=production pnpm --filter @yammer/server dev` serves the built bundle + API from the same one process.)
+One process serves the API, the STT WebSocket, and the web client at **http://localhost:3141**. Sign in with Google, tap to start listening, and talk.
 
-> Real STT/LLM/Tavily calls cost money; the per-document spend meter (bottom of the chat sidebar) shows live cost. See `plan.md` §16 for the in-browser verification checklist.
+To try the UI without a backend or API keys: `VITE_MOCK=1 pnpm --filter @yammer/web dev`.
 
-## Live-API eval (opt-in, real spend)
+Real speech-to-text, LLM, and search calls cost money; the spend meter at the bottom of the chat sidebar shows live cost.
 
-A gated suite that exercises the real model on golden instruction cases, cost-accounted and hard-capped. It **skips with no spend** unless enabled:
+## Testing
 
 ```sh
-# needs OPENAI_API_KEY in the environment; ~$0.03-0.14 per full run on Luna
-YAMMER_LIVE=1 pnpm --filter @yammer/server eval:live
+pnpm test        # unit + component tests (no network, no spend)
+pnpm typecheck
 ```
 
-## Deployment
+An opt-in live-API eval runs golden instruction cases against the real model. It is cost-accounted, hard-capped by `YAMMER_LIVE_BUDGET_USD` (default $0.50), and skips unless enabled:
 
-Self-hosted on a VPS behind Caddy, new database on the existing Postgres. Not wired yet -- see `plan.md` §15.
+```sh
+YAMMER_LIVE=1 pnpm --filter @yammer/server eval:live   # needs OPENAI_API_KEY; a few cents per run
+```
+
+## Docs
+
+- [`plan.md`](./plan.md) -- full blueprint: architecture, decisions, roadmap, backlog
+- [`vision.md`](./vision.md) -- the original vision
+- [`CLAUDE.md`](./CLAUDE.md) -- working guidelines for AI coding agents
+
+## License
+
+[MIT](./LICENSE)
